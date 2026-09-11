@@ -37,7 +37,7 @@ def rrun(cmd):
 def fetch():
     STAGE.mkdir(exist_ok=True)
     print("regenerating figures on the cluster ...")
-    rrun(f"module load pytorch/2.0.1 >/dev/null 2>&1; cd {REMOTE}/src && "
+    rrun(f"source /etc/profile; module load pytorch/2.0.1 >/dev/null 2>&1; cd {REMOTE}/src && "
          f"RUNS={REMOTE}/runs OUT={REMOTE}/figures python collect.py")
 
     for sub in ("figures", "results", "weights", "src"):
