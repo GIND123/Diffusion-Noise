@@ -151,18 +151,20 @@ def build_op_dataset(n, digits, max_prompt, canvas, seed=0, exact=False,
             prompt.append(ch); ppos.append(off + len(pb) - j); pseg.append(2)
         prompt.append("="); ppos.append(0); pseg.append(0)
 
-        target, tpos, tseg = [], [], []
-        digs = ps[::-1] if reverse else ps
-        for j, ch in enumerate(digs):
-            target.append(ch)
-            tpos.append(off + ((j + 1) if reverse else (len(ps) - j))); tseg.append(3)
-        target.append("[EOS]"); tpos.append(off + len(ps) + 1); tseg.append(4)
+        target = list(ps[::-1] if reverse else ps) + ["[EOS]"]
 
         pe, te = tok.encode(prompt), tok.encode(target)
         if len(pe) > max_prompt or len(te) > canvas:
             raise ValueError(f"too long: {len(pe)}>{max_prompt} or {len(te)}>{canvas}")
         P[i, : len(pe)] = pe;  PP[i, : len(pe)] = ppos;  PS[i, : len(pe)] = pseg
-        T[i, : len(te)] = te;  TP[i, : len(te)] = tpos;  TS[i, : len(te)] = tseg
+        T[i, : len(te)] = te
+        # Every canvas slot gets a place-value id and the answer segment,
+        # INCLUDING slots past the end. Assigning ids only to written slots made
+        # the count of non-zero ids equal the answer length, which handed the
+        # model the answer length for free at generation time (leak found by
+        # src/audit.py) and was information the sequential-id baseline never got.
+        TP[i, :] = off + np.arange(canvas) + 1
+        TS[i, :] = 3
         pmask[i, : len(pe)] = True
     return P, T, pmask, PP, TP, PS, TS, tok
 
@@ -225,7 +227,14 @@ def build_add_dataset_coupled(n, digits, max_prompt, canvas, seed=0, exact=False
         if len(pe) > max_prompt or len(te) > canvas:
             raise ValueError(f"too long: {len(pe)}>{max_prompt} or {len(te)}>{canvas}")
         P[i, : len(pe)] = pe;  PP[i, : len(pe)] = ppos;  PS[i, : len(pe)] = pseg
-        T[i, : len(te)] = te;  TP[i, : len(te)] = tpos;  TS[i, : len(te)] = tseg
+        T[i, : len(te)] = te
+        # Every canvas slot gets a place-value id and the answer segment,
+        # INCLUDING slots past the end. Assigning ids only to written slots made
+        # the count of non-zero ids equal the answer length, which handed the
+        # model the answer length for free at generation time (leak found by
+        # src/audit.py) and was information the sequential-id baseline never got.
+        TP[i, :] = off + np.arange(canvas) + 1
+        TS[i, :] = 3
         pmask[i, : len(pe)] = True
     return P, T, pmask, PP, TP, PS, TS, tok
 
