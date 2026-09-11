@@ -1,0 +1,206 @@
+"""Addition with optional significance-aligned position ids (the method).
+
+Baseline (--coupled 0): tokens numbered by sequence index, the standard scheme.
+Method   (--coupled 1): tokens numbered by PLACE VALUE, so digits that must be
+combined share an id, plus a random per-example offset so the model keys on
+relative place value and sees large ids during training.
+
+Units-first output order, which is what makes the place-value id of answer slot
+j simply j+1 -- known before generation starts, for both architectures.
+"""
+import argparse, json, math, os, time
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from data import build_add_dataset_coupled, Tokenizer
+from model import Transformer
+
+
+def get_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["ar", "diff"], required=True)
+    p.add_argument("--pe", default="ape", choices=["nope", "ape", "sin", "rope", "alibi"])
+    p.add_argument("--coupled", type=int, default=1)
+    p.add_argument("--max_offset", type=int, default=20)
+    p.add_argument("--digits", type=int, default=5)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--n_train", type=int, default=200000)
+    p.add_argument("--n_eval", type=int, default=500)
+    p.add_argument("--d", type=int, default=384)
+    p.add_argument("--layers", type=int, default=6)
+    p.add_argument("--heads", type=int, default=6)
+    p.add_argument("--bs", type=int, default=128)
+    p.add_argument("--accum", type=int, default=2)
+    p.add_argument("--eval_bs", type=int, default=100)
+    p.add_argument("--steps", type=int, default=10000)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--warmup", type=int, default=300)
+    p.add_argument("--T", type=int, default=16)
+    p.add_argument("--eval_every", type=int, default=5000)
+    p.add_argument("--out", default="runs/dev")
+    return p.parse_args()
+
+
+TEST_DIGITS = [5, 6, 7, 8, 10, 12]
+MAX_TEST = max(TEST_DIGITS)
+MAX_PROMPT = 2 * MAX_TEST + 2
+CANVAS = MAX_TEST + 3
+
+
+def load(n, digits, seed, exact, args):
+    P, T, pm, PP, TP, tok = build_add_dataset_coupled(
+        n, digits, MAX_PROMPT, CANVAS, seed=seed, exact=exact,
+        reverse=True, max_offset=args.max_offset if args.coupled else 0)
+    return (torch.from_numpy(P), torch.from_numpy(T), torch.from_numpy(pm),
+            torch.from_numpy(PP), torch.from_numpy(TP), tok)
+
+
+def pos_for(PPb, TPb, args, device):
+    """Full-sequence position ids, or None to fall back to sequence index."""
+    if not args.coupled:
+        return None
+    return torch.cat([PPb, TPb], 1).to(device)
+
+
+def pad_mask_of(pmb, canvas, device):
+    return torch.cat([pmb.to(device), torch.ones(pmb.shape[0], canvas, dtype=torch.bool, device=device)], 1)
+
+
+def diffusion_loss(model, P, T, pm, PP, TP, tok, args, device):
+    B, canvas = T.shape
+    t_min = 1.0 / canvas
+    t = t_min + (1.0 - t_min) * torch.rand(B, device=device)
+    noise = torch.rand(B, canvas, device=device) < t[:, None]
+    noise[torch.arange(B, device=device), torch.randint(0, canvas, (B,), device=device)] = True
+    x_t = torch.where(noise, torch.full_like(T, tok.mask), T)
+    logits = model(torch.cat([P, x_t], 1), pad_mask_of(pm, canvas, device),
+                   pos_for(PP, TP, args, device))[:, P.shape[1]:]
+    ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), T.reshape(-1), reduction="none")
+    ce = (ce.view(B, canvas) * noise).sum(1)
+    return ((1.0 / t) * ce / canvas).mean()
+
+
+def ar_loss(model, P, T, pm, PP, TP, tok, args, device):
+    canvas = T.shape[1]
+    logits = model(torch.cat([P, T], 1), pad_mask_of(pm, canvas, device),
+                   pos_for(PP, TP, args, device))
+    pred = logits[:, P.shape[1] - 1: -1]
+    return F.cross_entropy(pred.reshape(-1, pred.size(-1)), T.reshape(-1))
+
+
+@torch.no_grad()
+def sample_diffusion(model, P, pm, PP, TP, tok, args, device):
+    B, canvas = P.shape[0], CANVAS
+    x = torch.full((B, canvas), tok.mask, device=device, dtype=torch.long)
+    pmask = pad_mask_of(pm, canvas, device)
+    pos = pos_for(PP, TP, args, device)
+    pred = None
+    for s in range(args.T, 0, -1):
+        masked = x == tok.mask
+        if not masked.any():
+            break
+        logits = model(torch.cat([P, x], 1), pmask, pos)[:, P.shape[1]:]
+        conf, pred = logits.softmax(-1).max(-1)
+        conf = conf.masked_fill(~masked, -1.0)
+        remaining = int(canvas * (s - 1) / args.T)
+        for b in range(B):
+            k = max(0, int(masked[b].sum()) - remaining)
+            if k:
+                x[b, conf[b].topk(k).indices] = pred[b, conf[b].topk(k).indices]
+    still = x == tok.mask
+    if still.any() and pred is not None:
+        x[still] = pred[still]
+    return x
+
+
+@torch.no_grad()
+def sample_ar(model, P, pm, PP, TP, tok, args, device):
+    B = P.shape[0]
+    out = torch.full((B, CANVAS), tok.pad, device=device, dtype=torch.long)
+    cur, curpos = P, PP.to(device)
+    curmask = pm.to(device)
+    for j in range(CANVAS):
+        pmk = torch.cat([curmask, torch.ones(B, j, dtype=torch.bool, device=device)], 1) if j else curmask
+        pos = torch.cat([curpos, TP[:, :j].to(device)], 1) if args.coupled else None
+        logits = model(cur, pmk, pos)
+        nxt = logits[:, -1].argmax(-1)
+        out[:, j] = nxt
+        cur = torch.cat([cur, nxt[:, None]], 1)
+    return out
+
+
+def exact_match(pred, gold, tok):
+    ok = 0
+    for p, g in zip(pred.tolist(), gold.tolist()):
+        ge = g.index(tok.eos) if tok.eos in g else len(g)
+        pe = p.index(tok.eos) if tok.eos in p else len(p)
+        if p[:pe] == g[:ge]:
+            ok += 1
+    return ok / len(gold)
+
+
+@torch.no_grad()
+def evaluate(model, args, tok, device):
+    model.eval()
+    res = {}
+    for dd in TEST_DIGITS:
+        P, T, pm, PP, TP, _ = load(args.n_eval, dd, 40_000 + dd, True, args)
+        accs = []
+        for i in range(0, len(P), args.eval_bs):
+            sl = slice(i, i + args.eval_bs)
+            ac = dict(device_type="cuda", dtype=torch.bfloat16) if device == "cuda" else dict(device_type="cpu", enabled=False)
+            with torch.autocast(**ac):
+                f = sample_diffusion if args.mode == "diff" else sample_ar
+                pred = f(model, P[sl].to(device), pm[sl], PP[sl], TP[sl], tok, args, device)
+            accs.append(exact_match(pred, T[sl].to(device), tok))
+        res[f"d{dd}"] = float(np.mean(accs))
+    model.train()
+    return res
+
+
+def main():
+    args = get_args()
+    torch.manual_seed(args.seed); np.random.seed(args.seed)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    os.makedirs(args.out, exist_ok=True)
+
+    P, T, pm, PP, TP, tok = load(args.n_train, args.digits, args.seed, False, args)
+    max_len = MAX_PROMPT + CANVAS + args.max_offset + MAX_TEST + 8
+    model = Transformer(len(tok), args.d, args.layers, args.heads, args.pe,
+                        causal=(args.mode == "ar"), max_len=max_len).to(device)
+    print(f"[{args.mode}/{args.pe}/coupled={args.coupled}] params={model.n_params()/1e6:.2f}M "
+          f"train_digits<={args.digits} test={TEST_DIGITS}", flush=True)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda s: min(1.0, (s + 1) / args.warmup) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps))))
+    amp = dict(device_type="cuda", dtype=torch.bfloat16) if device == "cuda" else dict(device_type="cpu", enabled=False)
+    lossfn = diffusion_loss if args.mode == "diff" else ar_loss
+
+    log, t0 = [], time.time()
+    for step in range(args.steps):
+        opt.zero_grad(set_to_none=True)
+        tot = 0.0
+        for _ in range(args.accum):
+            i = torch.randint(0, len(P), (args.bs,))
+            with torch.autocast(**amp):
+                loss = lossfn(model, P[i].to(device), T[i].to(device), pm[i],
+                              PP[i], TP[i], tok, args, device) / args.accum
+            loss.backward(); tot += loss.item()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step(); sched.step()
+        if step % 500 == 0:
+            print(f"step {step:6d} loss {tot:.4f} ({time.time()-t0:.0f}s)", flush=True)
+        if (step + 1) % args.eval_every == 0:
+            print(f"  EVAL {step+1}: {evaluate(model, args, tok, device)}", flush=True)
+
+    final = evaluate(model, args, tok, device)
+    json.dump({"args": vars(args), "final": final, "minutes": (time.time() - t0) / 60},
+              open(os.path.join(args.out, "result.json"), "w"), indent=2)
+    torch.save(model.state_dict(), os.path.join(args.out, "model.pt"))
+    print("FINAL", json.dumps(final), flush=True)
+
+
+if __name__ == "__main__":
+    main()
