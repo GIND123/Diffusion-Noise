@@ -176,7 +176,40 @@ metrics: the model produced **perfectly correct digits** and was scored at 0%
 because the end-of-sequence marker landed in the wrong slot, being positionally
 indistinguishable from padding.
 
-Current numbers are in [`figures/summary.md`](https://huggingface.co/GOVINDFROM/masked-diffusion-length-generalization/blob/main/figures/summary.md).
+### Figures
+
+![Main result](figures/fig1_main.png)
+
+**Figure 1.** Length generalization on addition. Sequential position identifiers
+(red) collapse the moment the numbers exceed the training range; place-value
+identifiers (blue) hold well beyond it. Shaded bars are ± 1 standard deviation
+over 3 seeds; the dashed line marks the longest length seen in training.
+
+![Encoding transfer](figures/fig2_encodings.png)
+
+**Figure 2.** The same positional encoding produces opposite outcomes in the two
+architectures. Schemes that give autoregressive models perfect in-distribution
+accuracy leave masked diffusion unable to learn the task at all.
+
+![Denoising passes](figures/fig3_denoising_steps.png)
+
+**Figure 3.** Accuracy against the number of denoising passes — compute spent
+purely at inference, with no autoregressive equivalent. Reported as a full curve
+so that no single favourable step count is cherry-picked.
+
+<!-- RESULTS:START -->
+| run group | d5 | d6 | d7 | d8 | d10 | d12 | seeds |
+|---|---|---|---|---|---|---|---|
+| baseline / ar / ape | 100.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 3 |
+| baseline / ar / alibi | 100.0±0 | 21.6±5 | 0.8±0 | 0.0±0 | 0.0±0 | 0.0±0 | 3 |
+| baseline / diff / ape | 100.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 3 |
+| baseline / diff / alibi | 99.9±0 | 33.0±24 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 3 |
+| ours / ar / ape | 100.0±0 | 79.1±10 | 22.4±27 | 6.6±9 | 0.1±0 | 0.0±0 | 3 |
+| ours / ar / alibi | 99.9±0 | 97.7±1 | 77.1±5 | 30.3±9 | 0.4±0 | 0.0±0 | 3 |
+| ours / diff / ape | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.1±0 | 3 |
+| ours / diff / alibi | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 2.5±2 | 3 |
+
+<!-- RESULTS:END -->
 
 ---
 
