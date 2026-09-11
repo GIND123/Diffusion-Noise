@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import build_add_dataset_coupled, Tokenizer
+from data import build_op_dataset, Tokenizer
 from model import Transformer
 
 
@@ -22,6 +22,8 @@ def get_args():
     p.add_argument("--mode", choices=["ar", "diff"], required=True)
     p.add_argument("--pe", default="ape", choices=["nope", "ape", "sin", "rope", "alibi"])
     p.add_argument("--coupled", type=int, default=1)
+    p.add_argument("--op", choices=["add", "mul"], default="add")
+    p.add_argument("--segments", type=int, default=1)
     p.add_argument("--max_offset", type=int, default=20)
     p.add_argument("--digits", type=int, default=5)
     p.add_argument("--seed", type=int, default=0)
@@ -42,18 +44,27 @@ def get_args():
     return p.parse_args()
 
 
-TEST_DIGITS = [5, 6, 7, 8, 10, 12]
-MAX_TEST = max(TEST_DIGITS)
-MAX_PROMPT = 2 * MAX_TEST + 2
-CANVAS = MAX_TEST + 3
+# Ladder and canvas depend on the operation: multiplication answers are twice
+# as long as their operands, so it uses a shorter ladder to keep cost sane.
+LADDER = {"add": [5, 6, 7, 8, 10, 12, 15, 20], "mul": [3, 4, 5, 6, 7]}
+TEST_DIGITS, MAX_TEST, MAX_PROMPT, CANVAS = None, None, None, None
+
+
+def set_sizes(op):
+    global TEST_DIGITS, MAX_TEST, MAX_PROMPT, CANVAS
+    TEST_DIGITS = LADDER[op]
+    MAX_TEST = max(TEST_DIGITS)
+    MAX_PROMPT = 2 * MAX_TEST + 2
+    CANVAS = (MAX_TEST + 3) if op == "add" else (2 * MAX_TEST + 3)
 
 
 def load(n, digits, seed, exact, args):
-    P, T, pm, PP, TP, tok = build_add_dataset_coupled(
-        n, digits, MAX_PROMPT, CANVAS, seed=seed, exact=exact,
+    P, T, pm, PP, TP, PS, TS, tok = build_op_dataset(
+        n, digits, MAX_PROMPT, CANVAS, seed=seed, exact=exact, op=args.op,
         reverse=True, max_offset=args.max_offset if args.coupled else 0)
     return (torch.from_numpy(P), torch.from_numpy(T), torch.from_numpy(pm),
-            torch.from_numpy(PP), torch.from_numpy(TP), tok)
+            torch.from_numpy(PP), torch.from_numpy(TP),
+            torch.from_numpy(PS), torch.from_numpy(TS), tok)
 
 
 def pos_for(PPb, TPb, args, device):
@@ -63,11 +74,20 @@ def pos_for(PPb, TPb, args, device):
     return torch.cat([PPb, TPb], 1).to(device)
 
 
+def seg_for(PSb, TSb, args, device):
+    """Segment ids mark operand-A / operand-B / answer. Only meaningful when
+    place-value ids are in use, since those deliberately collide across the
+    three segments."""
+    if not args.coupled or not args.segments:
+        return None
+    return torch.cat([PSb, TSb], 1).to(device)
+
+
 def pad_mask_of(pmb, canvas, device):
     return torch.cat([pmb.to(device), torch.ones(pmb.shape[0], canvas, dtype=torch.bool, device=device)], 1)
 
 
-def diffusion_loss(model, P, T, pm, PP, TP, tok, args, device):
+def diffusion_loss(model, P, T, pm, PP, TP, PS, TS, tok, args, device):
     B, canvas = T.shape
     t_min = 1.0 / canvas
     t = t_min + (1.0 - t_min) * torch.rand(B, device=device)
@@ -75,32 +95,35 @@ def diffusion_loss(model, P, T, pm, PP, TP, tok, args, device):
     noise[torch.arange(B, device=device), torch.randint(0, canvas, (B,), device=device)] = True
     x_t = torch.where(noise, torch.full_like(T, tok.mask), T)
     logits = model(torch.cat([P, x_t], 1), pad_mask_of(pm, canvas, device),
-                   pos_for(PP, TP, args, device))[:, P.shape[1]:]
+                   pos_for(PP, TP, args, device),
+                   seg_for(PS, TS, args, device))[:, P.shape[1]:]
     ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), T.reshape(-1), reduction="none")
     ce = (ce.view(B, canvas) * noise).sum(1)
     return ((1.0 / t) * ce / canvas).mean()
 
 
-def ar_loss(model, P, T, pm, PP, TP, tok, args, device):
+def ar_loss(model, P, T, pm, PP, TP, PS, TS, tok, args, device):
     canvas = T.shape[1]
     logits = model(torch.cat([P, T], 1), pad_mask_of(pm, canvas, device),
-                   pos_for(PP, TP, args, device))
+                   pos_for(PP, TP, args, device),
+                   seg_for(PS, TS, args, device))
     pred = logits[:, P.shape[1] - 1: -1]
     return F.cross_entropy(pred.reshape(-1, pred.size(-1)), T.reshape(-1))
 
 
 @torch.no_grad()
-def sample_diffusion(model, P, pm, PP, TP, tok, args, device):
+def sample_diffusion(model, P, pm, PP, TP, PS, TS, tok, args, device):
     B, canvas = P.shape[0], CANVAS
     x = torch.full((B, canvas), tok.mask, device=device, dtype=torch.long)
     pmask = pad_mask_of(pm, canvas, device)
     pos = pos_for(PP, TP, args, device)
+    seg = seg_for(PS, TS, args, device)
     pred = None
     for s in range(args.T, 0, -1):
         masked = x == tok.mask
         if not masked.any():
             break
-        logits = model(torch.cat([P, x], 1), pmask, pos)[:, P.shape[1]:]
+        logits = model(torch.cat([P, x], 1), pmask, pos, seg)[:, P.shape[1]:]
         conf, pred = logits.softmax(-1).max(-1)
         conf = conf.masked_fill(~masked, -1.0)
         remaining = int(canvas * (s - 1) / args.T)
@@ -115,7 +138,7 @@ def sample_diffusion(model, P, pm, PP, TP, tok, args, device):
 
 
 @torch.no_grad()
-def sample_ar(model, P, pm, PP, TP, tok, args, device):
+def sample_ar(model, P, pm, PP, TP, PS, TS, tok, args, device):
     B = P.shape[0]
     out = torch.full((B, CANVAS), tok.pad, device=device, dtype=torch.long)
     cur, curpos = P, PP.to(device)
@@ -123,7 +146,8 @@ def sample_ar(model, P, pm, PP, TP, tok, args, device):
     for j in range(CANVAS):
         pmk = torch.cat([curmask, torch.ones(B, j, dtype=torch.bool, device=device)], 1) if j else curmask
         pos = torch.cat([curpos, TP[:, :j].to(device)], 1) if args.coupled else None
-        logits = model(cur, pmk, pos)
+        seg = torch.cat([PS.to(device), TS[:, :j].to(device)], 1) if args.coupled else None
+        logits = model(cur, pmk, pos, seg)
         nxt = logits[:, -1].argmax(-1)
         out[:, j] = nxt
         cur = torch.cat([cur, nxt[:, None]], 1)
@@ -131,41 +155,58 @@ def sample_ar(model, P, pm, PP, TP, tok, args, device):
 
 
 def exact_match(pred, gold, tok):
-    ok = 0
+    """Compare answer digits only: drop padding, then truncate at the first EOS.
+    Trailing padding is not part of the answer and must not count against it."""
+    def norm(seq):
+        seq = [t for t in seq if t != tok.pad]
+        return seq[: seq.index(tok.eos)] if tok.eos in seq else seq
+    return sum(norm(p) == norm(g) for p, g in zip(pred.tolist(), gold.tolist())) / len(gold)
+
+
+def digit_acc(pred, gold, tok):
+    """Fraction of answer digits correct (partial credit), aligned from the
+    units end. Exact match is the headline metric but hides how close a model
+    is; this shows graded degradation."""
+    def norm(seq):
+        seq = [t for t in seq if t != tok.pad]
+        return seq[: seq.index(tok.eos)] if tok.eos in seq else seq
+    num = den = 0
     for p, g in zip(pred.tolist(), gold.tolist()):
-        ge = g.index(tok.eos) if tok.eos in g else len(g)
-        pe = p.index(tok.eos) if tok.eos in p else len(p)
-        if p[:pe] == g[:ge]:
-            ok += 1
-    return ok / len(gold)
+        pn, gn = norm(p), norm(g)
+        den += len(gn)
+        num += sum(1 for i in range(len(gn)) if i < len(pn) and pn[i] == gn[i])
+    return num / max(den, 1)
 
 
 @torch.no_grad()
 def evaluate(model, args, tok, device):
     model.eval()
-    res = {}
+    res, dres = {}, {}
     for dd in TEST_DIGITS:
-        P, T, pm, PP, TP, _ = load(args.n_eval, dd, 40_000 + dd, True, args)
-        accs = []
+        P, T, pm, PP, TP, PS, TS, _ = load(args.n_eval, dd, 40_000 + dd, True, args)
+        accs, dgs = [], []
         for i in range(0, len(P), args.eval_bs):
             sl = slice(i, i + args.eval_bs)
             ac = dict(device_type="cuda", dtype=torch.bfloat16) if device == "cuda" else dict(device_type="cpu", enabled=False)
             with torch.autocast(**ac):
                 f = sample_diffusion if args.mode == "diff" else sample_ar
-                pred = f(model, P[sl].to(device), pm[sl], PP[sl], TP[sl], tok, args, device)
+                pred = f(model, P[sl].to(device), pm[sl], PP[sl], TP[sl], PS[sl], TS[sl], tok, args, device)
             accs.append(exact_match(pred, T[sl].to(device), tok))
+            dgs.append(digit_acc(pred, T[sl].to(device), tok))
         res[f"d{dd}"] = float(np.mean(accs))
+        dres[f"d{dd}"] = float(np.mean(dgs))
     model.train()
-    return res
+    return res, dres
 
 
 def main():
     args = get_args()
+    set_sizes(args.op)
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.out, exist_ok=True)
 
-    P, T, pm, PP, TP, tok = load(args.n_train, args.digits, args.seed, False, args)
+    P, T, pm, PP, TP, PS, TS, tok = load(args.n_train, args.digits, args.seed, False, args)
     max_len = MAX_PROMPT + CANVAS + args.max_offset + MAX_TEST + 8
     model = Transformer(len(tok), args.d, args.layers, args.heads, args.pe,
                         causal=(args.mode == "ar"), max_len=max_len).to(device)
@@ -186,17 +227,30 @@ def main():
             i = torch.randint(0, len(P), (args.bs,))
             with torch.autocast(**amp):
                 loss = lossfn(model, P[i].to(device), T[i].to(device), pm[i],
-                              PP[i], TP[i], tok, args, device) / args.accum
+                              PP[i], TP[i], PS[i], TS[i], tok, args, device) / args.accum
             loss.backward(); tot += loss.item()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); sched.step()
         if step % 500 == 0:
             print(f"step {step:6d} loss {tot:.4f} ({time.time()-t0:.0f}s)", flush=True)
         if (step + 1) % args.eval_every == 0:
-            print(f"  EVAL {step+1}: {evaluate(model, args, tok, device)}", flush=True)
+            e, _ = evaluate(model, args, tok, device)
+            print(f"  EVAL {step+1}: {e}", flush=True)
 
-    final = evaluate(model, args, tok, device)
-    json.dump({"args": vars(args), "final": final, "minutes": (time.time() - t0) / 60},
+    final, dfinal = evaluate(model, args, tok, device)
+
+    # accuracy vs number of denoising passes (no autoregressive analogue)
+    nfe = {}
+    if args.mode == "diff":
+        keep = args.T
+        for t_steps in (1, 2, 4, 8, 16, 32):
+            args.T = t_steps
+            e, _ = evaluate(model, args, tok, device)
+            nfe[t_steps] = e
+        args.T = keep
+
+    json.dump({"args": vars(args), "final": final, "digit_acc": dfinal,
+               "nfe": nfe, "minutes": (time.time() - t0) / 60},
               open(os.path.join(args.out, "result.json"), "w"), indent=2)
     torch.save(model.state_dict(), os.path.join(args.out, "model.pt"))
     print("FINAL", json.dumps(final), flush=True)

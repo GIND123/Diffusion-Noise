@@ -109,6 +109,64 @@ def build_sort_dataset(n, num_nodes, k, max_prompt, canvas, seed=0):
     return P, T, pmask, tok
 
 
+def build_op_dataset(n, digits, max_prompt, canvas, seed=0, exact=False,
+                     reverse=True, max_offset=8, op="add"):
+    """Place-value-aligned dataset for addition or multiplication.
+
+    Multiplication is the harder case on purpose: its algorithm is NOT
+    place-local (every output digit depends on many input pairs), so it probes
+    whether the method works only when place-value alignment happens to match
+    the algorithm's dependency structure.
+    """
+    tok = Tokenizer(10)
+    rng = np.random.default_rng(seed)
+    P = np.full((n, max_prompt), tok.pad, dtype=np.int64)
+    T = np.full((n, canvas), tok.pad, dtype=np.int64)
+    PP = np.zeros((n, max_prompt), dtype=np.int64)
+    TP = np.zeros((n, canvas), dtype=np.int64)
+    PS = np.zeros((n, max_prompt), dtype=np.int64)
+    TS = np.zeros((n, canvas), dtype=np.int64)
+    pmask = np.zeros((n, max_prompt), dtype=bool)
+    sym = "+" if op == "add" else "|"     # reuse an existing vocab symbol
+
+    for i in range(n):
+        d = digits if exact else int(rng.integers(1, digits + 1))
+        # Build operands digit-by-digit: 10**20 overflows int64, but Python ints
+        # are arbitrary precision, so the arithmetic itself is exact at any size.
+        def draw(nd):
+            ds = rng.integers(0, 10, size=nd)
+            if nd > 1 and ds[0] == 0:
+                ds[0] = rng.integers(1, 10)
+            return "".join(str(int(x)) for x in ds)
+        pa, pb = draw(d), draw(d)
+        a, b = int(pa), int(pb)
+        ps = str(a + b if op == "add" else a * b)
+        off = int(rng.integers(0, max_offset + 1))
+
+        prompt, ppos, pseg = [], [], []
+        for j, ch in enumerate(pa):
+            prompt.append(ch); ppos.append(off + len(pa) - j); pseg.append(1)
+        prompt.append(sym); ppos.append(0); pseg.append(0)
+        for j, ch in enumerate(pb):
+            prompt.append(ch); ppos.append(off + len(pb) - j); pseg.append(2)
+        prompt.append("="); ppos.append(0); pseg.append(0)
+
+        target, tpos, tseg = [], [], []
+        digs = ps[::-1] if reverse else ps
+        for j, ch in enumerate(digs):
+            target.append(ch)
+            tpos.append(off + ((j + 1) if reverse else (len(ps) - j))); tseg.append(3)
+        target.append("[EOS]"); tpos.append(off + len(ps) + 1); tseg.append(4)
+
+        pe, te = tok.encode(prompt), tok.encode(target)
+        if len(pe) > max_prompt or len(te) > canvas:
+            raise ValueError(f"too long: {len(pe)}>{max_prompt} or {len(te)}>{canvas}")
+        P[i, : len(pe)] = pe;  PP[i, : len(pe)] = ppos;  PS[i, : len(pe)] = pseg
+        T[i, : len(te)] = te;  TP[i, : len(te)] = tpos;  TS[i, : len(te)] = tseg
+        pmask[i, : len(pe)] = True
+    return P, T, pmask, PP, TP, PS, TS, tok
+
+
 def build_add_dataset_coupled(n, digits, max_prompt, canvas, seed=0, exact=False,
                               reverse=True, max_offset=8):
     """Addition with SIGNIFICANCE-ALIGNED position ids (our method).
@@ -132,6 +190,8 @@ def build_add_dataset_coupled(n, digits, max_prompt, canvas, seed=0, exact=False
     T = np.full((n, canvas), tok.pad, dtype=np.int64)
     PP = np.zeros((n, max_prompt), dtype=np.int64)
     TP = np.zeros((n, canvas), dtype=np.int64)
+    PS = np.zeros((n, max_prompt), dtype=np.int64)
+    TS = np.zeros((n, canvas), dtype=np.int64)
     pmask = np.zeros((n, max_prompt), dtype=bool)
 
     for i in range(n):
@@ -142,29 +202,32 @@ def build_add_dataset_coupled(n, digits, max_prompt, canvas, seed=0, exact=False
         pa, pb, ps = str(a), str(b), str(s)
         off = int(rng.integers(0, max_offset + 1))
 
-        prompt, ppos = [], []
+        prompt, ppos, pseg = [], [], []
         for j, ch in enumerate(pa):                 # most significant first
-            prompt.append(ch); ppos.append(off + len(pa) - j)
-        prompt.append("+"); ppos.append(0)
+            prompt.append(ch); ppos.append(off + len(pa) - j); pseg.append(1)
+        prompt.append("+"); ppos.append(0); pseg.append(0)
         for j, ch in enumerate(pb):
-            prompt.append(ch); ppos.append(off + len(pb) - j)
-        prompt.append("="); ppos.append(0)
+            prompt.append(ch); ppos.append(off + len(pb) - j); pseg.append(2)
+        prompt.append("="); ppos.append(0); pseg.append(0)
 
-        target, tpos = [], []
+        target, tpos, tseg = [], [], []
         digs = ps[::-1] if reverse else ps
         for j, ch in enumerate(digs):
             target.append(ch)
             sig = (j + 1) if reverse else (len(ps) - j)
-            tpos.append(off + sig)
-        target.append("[EOS]"); tpos.append(0)
+            tpos.append(off + sig); tseg.append(3)
+        # EOS gets its own place-value id (one past the most significant digit)
+        # and its own segment. Giving it id 0 made it indistinguishable from
+        # padding, so the model could not tell which slot should terminate.
+        target.append("[EOS]"); tpos.append(off + len(ps) + 1); tseg.append(4)
 
         pe, te = tok.encode(prompt), tok.encode(target)
         if len(pe) > max_prompt or len(te) > canvas:
             raise ValueError(f"too long: {len(pe)}>{max_prompt} or {len(te)}>{canvas}")
-        P[i, : len(pe)] = pe;  PP[i, : len(pe)] = ppos
-        T[i, : len(te)] = te;  TP[i, : len(te)] = tpos
+        P[i, : len(pe)] = pe;  PP[i, : len(pe)] = ppos;  PS[i, : len(pe)] = pseg
+        T[i, : len(te)] = te;  TP[i, : len(te)] = tpos;  TS[i, : len(te)] = tseg
         pmask[i, : len(pe)] = True
-    return P, T, pmask, PP, TP, tok
+    return P, T, pmask, PP, TP, PS, TS, tok
 
 
 def build_add_dataset(n, digits, max_prompt, canvas, seed=0, exact=False, reverse=True):

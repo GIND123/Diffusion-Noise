@@ -47,14 +47,15 @@ def fetch():
     subprocess.run(["scp", *SSH, "-q", f"zaratan:{REMOTE}/figures/*", str(STAGE / "figures")])
 
     print("copying result json ...")
-    names = [n for n in rrun(f"ls {REMOTE}/runs").split() if n]
-    for n in names:
-        out = subprocess.run(["scp", *SSH, "-q",
-                              f"zaratan:{REMOTE}/runs/{n}/result.json",
-                              str(STAGE / "results" / f"{n}.json")],
-                             capture_output=True, text=True)
+    rrun("mkdir -p ~/msml612-backup/results && "
+         "for d in %s/runs/*/; do n=$(basename $d); "
+         "[ -f \"$d/result.json\" ] && cp -f \"$d/result.json\" "
+         "\"$HOME/msml612-backup/results/$n.json\"; done" % REMOTE)
+    subprocess.run(["scp", *SSH, "-q", "-r",
+                    "zaratan:msml612-backup/results/.", str(STAGE / "results")])
     got = list((STAGE / "results").glob("*.json"))
     print(f"  {len(got)} result files")
+    names = [g.stem for g in got]
 
     # weights: seed 0 of each configuration keeps the upload to a sane size
     wanted = [n for n in names if n.endswith("-s0") or "-s0" in n]

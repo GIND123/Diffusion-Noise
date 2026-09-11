@@ -1,407 +1,241 @@
-# Does the Canvas Limit the Plan?
+# Length Generalization in Masked Diffusion Language Models
 
-**Length and hardness generalization in from-scratch masked diffusion planners.**
+**Place-value position identifiers let from-scratch masked diffusion models solve
+arithmetic problems longer than any they were trained on.**
 
-Target venue: TACL · Constraints: trained from scratch (no pretrained weights),
-masked-diffusion method, must beat published baselines, UMD Zaratan HPC.
+Everything here is trained **from random initialization** — no pretrained
+weights, no pretrained tokenizer, no distillation from a larger model. Models are
+~10.7M parameters and train in roughly 20 minutes on a single A100 MIG slice.
 
-> Cluster access, quotas, partitions and job mechanics live in the
-> [Zaratan README](../README.md). This document is the project: budget,
-> methodology, and experiment plan.
-
----
-
-## 0. Read this first — model size, not thrift, is the constraint
-
-**Don't agonize over SUs.** The scoped plan below costs ~5 kSU of a 50 kSU pool
-and you should just run it. For calibration, last semester's entire usage was
-**19 jobs / 498 SU (0.5 kSU)** — 480 of which was one 10-hour A100 job. Cost was
-never a concern because usage was ~1% of the pool.
-
-What *is* a hard constraint is the ceiling itself. The 50 kSU is enforced by the
-scheduler as `GrpTRESMins=billing=3000000`; when it is exhausted, jobs stop
-starting (`AssociationJobLimit`). That is not a budgeting preference.
-
-And the thing that actually decides what fits:
-
-| Config | Cost per training run | Equivalent |
-|---|---|---|
-| **Tiny (6M)** on a `a100_1g.5gb` slice | **~60 SU** | — |
-| **Small (85M)** on a full A100 | **~3,500 SU** | **58 Tiny runs** |
-| **Medium (303M)** | **~10,000+ SU** | 20% of the pool, for one run |
-
-So the real trade is: *the entire 88-run study at 6M*, or *1.5 Small runs*.
-That — not frugality — is why this plan is Tiny-only, and why Small/Medium
-headline runs are the specific thing worth requesting an AAC allocation for.
+- Code: this repository
+- Weights, results and figures: [huggingface.co/GOVINDFROM/masked-diffusion-length-generalization](https://huggingface.co/GOVINDFROM/masked-diffusion-length-generalization)
 
 ---
 
-## 0b. The arithmetic that forced the rescope
+## 1. The problem
 
-The original protocol budgets **~2,000 A100-hours**. On Zaratan that is:
+A language model that has learned *how to add* should add numbers of any length.
+A model that has merely fit the training distribution will fail as soon as the
+numbers get longer. Telling these apart is the cleanest available test of whether
+a generative model learned an algorithm or a pattern.
+
+This question is well studied for **autoregressive** models, which generate one
+token at a time, left to right. It is essentially unstudied for **masked
+diffusion language models**, which start with the whole answer hidden and reveal
+it over several refinement passes, in an order they choose. Diffusion language
+models are now being built at scale (LLaDA, Mercury, Gemini Diffusion) precisely
+because that parallel, revisable generation is fast and can correct itself — so
+how they extrapolate matters.
+
+The obvious move is to import what works for autoregressive models. **We show
+that fails, sometimes catastrophically, and explain why.**
+
+---
+
+## 2. Background: the two architectures
+
+Both use the *same* transformer. Only the attention mask and the training
+objective differ, so every comparison here is matched.
+
+### Autoregressive
+Causal attention — position *i* sees only positions ≤ *i*. Trained with
+next-token prediction. Generates greedily, left to right, and can never revise.
+
+### Masked diffusion (MDLM-style, absorbing state)
+Bidirectional attention — every position sees every other. Training corrupts the
+answer by replacing each token independently with a `[MASK]` placeholder with
+probability *t* (sampled per example), then asks the model to restore the
+originals, weighting the loss by `1/t`. Generation reverses this: start fully
+masked, and over *T* passes repeatedly predict every hidden slot and reveal the
+most confident ones.
 
 ```
-2,000 A100-h × 48 SU/h = 96,000 SU = 96 kSU
+pass 0:  __ __ __        (everything hidden)
+pass 1:  __ __  2
+pass 2:  __  3  2
+pass 3:   1  3  2
 ```
 
-Against the actual allocation:
+This is diffusion in the formal sense — the same destroy-then-learn-to-restore
+framework as image diffusion, with masking in place of Gaussian noise
+(D3PM, Austin et al. 2021; MDLM, Sahoo et al. 2024).
 
-| | |
+---
+
+## 3. Method: place-value position identifiers
+
+A transformer has no inherent sense of order, so position must be supplied. The
+standard choice numbers tokens by **where they sit in the sequence**. We instead
+number every digit by its **place value**:
+
+```
+ 4   7   +   8   5   =   1   3   2
+tens un.      tens un.    hun tens un.
+ 2   1   0    2   1   0    3   2   1
+```
+
+Digits that must be combined now share an identifier. The rule *"combine equal
+identifiers, carry into identifier + 1"* does not mention how many digits the
+operands have, so it applies unchanged at any length.
+
+Three details make it work:
+
+| Component | Why it is needed |
 |---|---|
-| `msml612-class` pool | **50 kSU total** |
-| Shared between | **67 students**, no per-user limits |
-| Even-split fair share | **~746 SU** (≈15 A100-h, ≈106 MIG-slice-h) |
-| Protocol requirement | **96 kSU = 192% of the entire class's semester** |
+| **Random offset** | A per-example constant is added to every identifier, so the model keys on *relative* place value and encounters large identifiers during training rather than only small ones. |
+| **Segment embeddings** | Place-value identifiers deliberately collide — the units digits of operand A, operand B and the answer all carry identifier 1. A causal model separates them via the attention mask; **a bidirectional model cannot**, so diffusion needs an explicit marker for which part of the equation a token belongs to. This component is required for diffusion and optional for autoregressive. |
+| **Terminator identifier** | The end-of-sequence token gets its own place-value identifier rather than sharing padding's. Without this the model produces perfectly correct digits but cannot tell which slot should terminate. |
 
-**And there is no free GPU tier.** `scavenger` (0 SU, 14-day walltime) contains
-only `compute-*` and `bigmem-*` nodes — `GRES=(null)`. Every GPU node sits
-exclusively in the paid `gpu-*` partitions. Verified 2026-09-10. So the usual
-"run it free on the preemptible queue" escape hatch **does not exist here**.
+The middle row is the part that is genuinely specific to diffusion, and it falls
+directly out of the failure analysis in §5.
 
-Three levers, in order of leverage:
-
-1. **Get a real allocation (do this first).** Faculty can apply to the UMD
-   Allocations and Advisory Committee: **up to 50 kSU/year with minimal
-   justification, up to 550 kSU/year with proper justification.** A TACL paper
-   should not be funded from a 67-way-shared teaching pool. *Ask the professor
-   to apply in week 1* — everything below gets easier if this lands.
-2. **Use MIG slices.** `a100_1g.5gb` costs **7 SU/h vs 48** for a full A100. A
-   6M-parameter model on ≤325-token sequences cannot saturate an A100 anyway,
-   so a slice delivers roughly **2–3× more completed work per SU** — and the
-   slice node exposes **28 of them**, so sweeps run wide in parallel.
-3. **Scope down to 6M.** See §2. This is not a compromise on the science:
-   MGDM's own headline result is that a **6M** diffusion model beats a **303M**
-   autoregressive one.
-
-**Working assumption for this plan: a negotiated ~5 kSU (10% of the class pool),
-which must be cleared with the professor.** Everything below is costed to fit
-that, with the full protocol staged behind an AAC allocation.
-
-### The insight that makes this survivable
-
-**The headline contribution is nearly free.** Hardness generalization =
-train on easy instances, *evaluate* on harder ones. Evaluation is
-inference-only: no extra training runs, seconds-to-minutes per split on a 6M
-model. Every OOD curve in this paper is a by-product of models you already
-trained for the baseline table.
-
-The budget is spent on *training base models and the PE sweep*, not on the
-contribution itself.
+> **Prior work.** Numbering arithmetic tokens by place value is established for
+> *autoregressive* models (position coupling; Abacus embeddings). We do not claim
+> that idea. Our contribution is the adaptation to bidirectional masked
+> diffusion — which does not work without the segment component — together with
+> the evidence that naive transfer of positional schemes across the two
+> architectures fails.
 
 ---
 
-## 1. Compute cost model
+## 4. Experiments
 
-| Resource | Rate | What 5 kSU buys |
+90 runs across four studies, 3 seeds each.
+
+| Study | What it varies | Runs |
 |---|---|---|
-| `a100_1g.5gb` (1/7 A100, 5 GB) | **7 SU/h** | ~714 slice-hours |
-| Full A100 (40 GB) | 48 SU/h | ~104 GPU-hours |
-| H100 | 144 SU/h | ~35 GPU-hours — **do not use** |
-| CPU core (`scavenger`, free) | 0 SU | data generation, preprocessing, CPU eval |
+| **A — Main** | place-value vs sequential identifiers × {autoregressive, diffusion} × {learned absolute, distance rule} | 24 |
+| **B — Encodings** | 5 positional encodings × 2 architectures | 30 |
+| **C — Ablation** | segment embeddings on/off × random offset on/off × 2 architectures | 24 |
+| **D — Transfer** | multiplication, where place value is *not* the algorithm | 12 |
 
-Billing = **max**(1/core, 0.25/GiB, GPU rate) × *actual* walltime. Confirmed
-against real `sacct` records (`billing=48` for 1×A100, `billing=7` for a slice).
+### Tasks
 
-**Estimated Tiny (6M) cost per training run** — *these are extrapolations from
-the protocol's A100-hour figures and MUST be replaced by measured numbers at
-Gate 0:*
+**Addition** — train on 1–5 digit operands, test at 5, 6, 7, 8, 10, 12, 15 and 20
+digits. Answers are written units-first, the standard format in this literature;
+it removes the autoregressive model's need to know the final carry before
+emitting its first token, so the baseline is the strong version rather than a
+straw man. Both architectures receive identical data.
 
-| Task | Seq len | Est. slice-hours | Est. SU |
-|---|---|---|---|
-| Star-graph (l=5, d=2) | ~50 | ~8 | ~56 |
-| Sorting (len 16) — control | ~35 | ~6 | ~42 |
-| Countdown-3 | **37** | ~8 | ~56 |
-| 3-SAT 5v | **258** | ~14 | ~98 |
-| ~~Sudoku~~ | 164 | ~40 | ~280 ❌ |
+**Multiplication** — train on 1–3 digits, test to 7. Included deliberately as the
+adversarial case: multiplication's algorithm is *not* place-local (each output
+digit depends on many input pairs), so it tests whether the method works only
+when place-value alignment happens to match the dependency structure.
 
-Sequence lengths are from MGDM's own `cutoff_len` table — these tasks are
-*tiny*, which is what makes the project viable at all.
+**Sorting** — an order-insensitive control. Every output position is computable
+independently, so if our effects appeared here too they would be about sequence
+length generally rather than about reasoning order.
 
----
+### Metrics
 
-## 2. Feasible scope — what is in and what is cut
-
-| Original protocol | Decision | Why |
-|---|---|---|
-| 5 tasks incl. Sudoku | **4 tasks, Sudoku dropped** | Most expensive Tiny task (~12 A100-h) *and* saturated at 100% — zero headroom. Cite MGDM's published number instead. |
-| Tiny + Small + Medium | **Tiny (6M) only** | Small headline runs are multi-day (~3 kSU *each*); Medium scaling check is ~9.6 kSU alone. Both deferred to an AAC allocation. |
-| 5 seeds headline / 3 ablation | **3 seeds / 2 seeds** | Keeps paired-bootstrap CIs meaningful at a third of the cost. |
-| PE sweep: 6 PE × 2 attn × 3 tasks × 3 seeds = 108 | **6 × 2 × 1 task × 3 seeds = 36** | Run on star-graph (cheapest). Extend to 3-SAT only if budget survives. |
-| 8-row ablation × 5 tasks × 3 seeds = 120 | **Leave-one-out on 2 tasks, 2 seeds ≈ 12** | Keeps the "component X contributes Y points" claim. |
-| 317 runs / ~2,000 A100-h | **~90 runs / ~5 kSU** | Fits a negotiated 10% of the pool. |
-
-### Tasks kept
-
-| Task | Role | Hardness dial | Train → OOD test | Why kept |
-|---|---|---|---|---|
-| **Star-graph** | **Primary showcase** | path length *l*, degree *d* | l=5,d=2 → l=7,10; d=3,5 | Cheapest run; most dramatic AR failure (mechanistically understood Clever-Hans at the junction); **two independent dials** separate "longer" from "harder" |
-| **3-SAT** | Main hardness dial | # variables; clause/var ratio | 5v → 7v, 9v, 11v | Cleanest continuous dial; verifiable in ms; phase transition at ratio ≈4.26 gives a second orthogonal dial |
-| **Countdown-3** | Comparability | # input numbers | 3 → 4, 5 | Only 37 tokens; MGDM publishes CD-3/4/5, so direct numeric comparison is possible |
-| **Sorting** | **Negative control** | length | 16 → 32, 64 | Order-insensitive. If gains appear here equally, the planning framing is wrong. Non-negotiable — cheap and it buys reviewer trust. |
-
----
-
-## 3. Research questions
-
-**RQ1 (measurement, guaranteed).** Do from-scratch masked diffusion planners
-generalize to instances harder than those seen in training, and do they degrade
-more gracefully than matched AR models?
-
-**RQ2 (mechanism).** Which bottleneck dominates the collapse?
-
-| | Hypothesis | Prediction if true |
-|---|---|---|
-| **H1** | **Fixed canvas** — diffusion commits to output length before denoising | Sharp cliff where required trace length exceeds the training canvas; largely restored by variable-length generation |
-| **H2** | **Positional encoding** — bidirectional attention has no causal mask to implicitly encode position | Large OOD spread across PEs, small in-distribution spread |
-| **H3** | **Fixed step budget** — denoising steps don't scale with hardness | OOD accuracy rises with step count well past in-distribution saturation |
-
-**RQ3 (method).** Can a from-scratch model combining the best answers extend the
-hardness envelope beyond MGDM and Adaptive Order Policies?
-
-### ⚠️ H1 is weakly testable as MGDM formats these tasks
-
-MGDM's canvas sizes are **CD-3/4/5 = 37 / 64 / 74** and **3-SAT 5v/7v/9v =
-258 / 285 / 325**. That is **+16%** from CD-4→CD-5 and **+26%** across the whole
-3-SAT range — *sub*-linear, not the "super-linear growth" the original protocol
-assumed. **Neither task meaningfully stresses the canvas.**
-
-Consequences, choose deliberately:
-
-- **Star-graph is the only task with a genuinely strong length dial** (path
-  length l=5→10 doubles the output) → make it the primary H1 testbed.
-- To test H1 on Countdown properly you would need **full Stream-of-Search
-  traces** (thousands of tokens, the actual search process) rather than MGDM's
-  compact final expressions. That raises data to tens of GB *and* run cost
-  substantially — **out of budget at 5 kSU; revisit under an AAC allocation.**
-- Otherwise, report H1 honestly as *tested primarily on star-graph*, and let
-  H2 carry the mechanistic weight.
-
-**The sharpest hook is H2**, not H1. Kazemnejad et al. (arXiv:2305.19466)
-established that NoPE beats ALiBi/RoPE/APE for length generalization in
-*causal* transformers — and the community explanation rests on **the causal
-mask** supplying implicit position. Masked diffusion has **no causal mask**, so
-there is a principled reason to expect the ranking *not* to transfer. Nobody has
-checked. It is also the cheapest axis in the project.
-
----
-
-## 4. Method
-
-Absorbing-state masked diffusion, MDLM-style (SUBS parameterization, no timestep
-conditioning), bidirectional transformer denoiser, **random init throughout** —
-no pretrained weights, no pretrained tokenizer. Vocabularies are tens of symbols,
-built from the training corpus.
-
-| Component | Addresses | Implementation |
-|---|---|---|
-| **C1 — Length-adaptive canvas** | H1 | (a) padded canvas + learned `[EOS]`, or (b) block-wise diffusion (BD3-LM): block size *B* interpolates AR (*B*=1) ↔ full diffusion (*B*=L), giving a free ablation axis |
-| **C2 — PE sweep** | H2 | NoPE / learned APE / sinusoidal / RoPE / ALiBi / randomized, matched in all else, run under **both** causal and bidirectional attention |
-| **C3 — Adaptive step budget** | H3 | Stop when `max_i max_v p(x_i=v) ≥ τ` over masked positions, capped at `T_max`. **Always report accuracy-vs-NFE curves**, never a single cherry-picked *T* |
-| **C4 — Hardness curriculum** | — | fixed-easy vs uniform mixture vs easy→hard anneal |
-
-### What to claim, explicitly
-
-> We do not claim novelty for learned decoding order (Mohamud et al. 2026),
-> flexible-length masked diffusion (arXiv:2509.01025), or remasking (ReMDM).
-> Our contribution is the first systematic study of hardness generalization for
-> from-scratch masked diffusion planners, the characterization of positional
-> encoding under bidirectional attention, and a combined recipe that extends the
-> solvable hardness envelope.
-
-Stating what you are *not* claiming is a strength in journal review.
-
----
-
-## 5. Baselines
-
-| # | Baseline | Source | Priority |
-|---|---|---|---|
-| 1 | Matched AR transformer | MGDM `train-sft.sh` | **Must** |
-| 2 | Vanilla MDLM (uniform masking) | kuleshov-group/mdlm | **Must** |
-| 3 | **MGDM** | HKUNLP/diffusion-vs-ar | **Must** — prior SOTA on these exact tasks |
-| 4 | **Adaptive Order Policies** (arXiv:2606.00295) | reimplement | **Must** — closest concurrent work; "no comparison" = rejection |
-| 5 | AR + reverse-order | Bachmann & Nagarajan | star-graph only |
-| 6 | AR + teacherless | Bachmann & Nagarajan | star-graph only |
-| 7 | Confidence-based adaptive inference (arXiv:2502.06768) | inference-only | cheap, add it |
-| 8 | Block diffusion *B*-sweep | bd3lms | if budget survives |
-
-### Matched-compute discipline (non-negotiable)
-
-Hold constant and **report in a table**: non-embedding params (±5%), training
-FLOPs, tokens seen, optimizer/schedule/warmup/decay, data splits and seeds.
-Also report measured **GPU-hours and SU**, which MGDM does not publish.
-
-**Tune the AR baseline as hard as your own model** — run its LR sweep. And set
-`--max_new_tokens` above the longest training sequence; getting that wrong
-silently cripples AR and is the most common reason diffusion papers get
-rejected.
-
----
-
-## 6. Evaluation
-
-All five tasks have **exactly checkable** answers — no human eval, no
-LLM-as-judge, no MAUVE, no BLEU. Say this in the paper; it removes a whole
-category of objection.
-
-| Task | Metric | Checker |
-|---|---|---|
-| Countdown | exact solve rate | evaluate expression vs target |
-| 3-SAT | satisfying-assignment rate | substitute into CNF |
-| Star-graph | exact path match | compare to ground truth |
-| Sorting | exact match | compare to `sorted()` |
-
-**Headline metric — the hardness envelope** `H*(ε)` = largest hardness level at
-which a model exceeds accuracy ε. Report `H*(0.5)` and `H*(0.9)`, plus the full
-accuracy-vs-hardness curve (the *shape* — graceful decay vs cliff — is what
-separates H1 from H2/H3).
-
-> **Reviewer risk:** defining your own metric can read as weak. Mitigate by
-> **also reporting raw accuracy on MGDM's own published splits** (CD-4, CD-5,
-> 3-SAT 7v/9v) so there are directly comparable numbers in the paper.
-
-Statistics: 3 seeds headline / 2 ablation, mean ± sd (never a single run),
-paired bootstrap over test instances with CIs. Decoding hyperparameters either
-fixed identically across methods or swept for all — sweeping only for your own
-method is the second-most-common rejection reason.
-
-ELBO/NLL only as a **labeled upper bound**, never in the same column as AR NLL.
-
----
-
-## 7. Experiment plan, costed
-
-| Phase | Runs | Est. SU | Gate |
-|---|---|---|---|
-| **0. Calibrate + reproduce** | 4 | ~250 | **G1**: reproduce MGDM > AR by a large margin on star-graph + CD-3. **Also: measure real per-run cost and re-cost everything below.** |
-| **1. Baselines** (3 methods × 4 tasks × 3 seeds) | 36 | ~2,270 | **G2**: AR *and* baseline diffusion both degrade on OOD splits. If both stay ~100%, dials are too weak. |
-| **2. PE sweep** (6 PE × 2 attn × star-graph × 3 seeds) | 36 | ~2,020 | **G3**: OOD spread across PEs > ~2 points. If not, H2 is a (still publishable) negative result — reallocate. |
-| **3. Components + AOP baseline** | ~12 | ~760 | **G4**: ≥1 component beats vanilla MDLM by ≥3 points OOD. If not → pivot to the measurement paper. |
-| **OOD evaluation, all phases** | — | **~0** | inference-only |
-| **Total** | **~88** | **~5,300 SU ≈ 10.6% of the class pool** | |
-
-**Gate 0 is the most important step in this document.** Do not submit Phase 1
-until one calibration run has produced a measured SU cost — every number above
-is an extrapolation and could be off by 2–3×.
-
-### Deferred until an AAC allocation lands
-
-Small (85M) headline runs · Medium (303M) scaling check · PE sweep extended to
-3-SAT · full Stream-of-Search Countdown traces for a real H1 test · Sudoku ·
-5 seeds.
-
----
-
-## 8. Storage plan
-
-Datasets are negligible; **checkpoints are the only real cost**, and at 6M they
-are small.
-
-| Item | Size |
+| Metric | Definition |
 |---|---|
-| All datasets incl. OOD splits (MGDM bundle + generated) | **< 5 GB** |
-| MGDM repo | 146 KB (code only; data is a separate Drive download) |
-| Tiny checkpoint — final weights fp32 / bf16 | 24 MB / 12 MB |
-| Tiny checkpoint — full resumable (AdamW, ~16 B/param) | ~96 MB |
-| **~90 runs, final weights only** | **~2.2 GB** |
-| Peak incl. rolling resume checkpoints | **~10 GB** |
+| **Exact match** | The entire answer must be correct. No partial credit. Checked by a deterministic program — no human judges, no model-as-judge. |
+| **Per-digit accuracy** | Fraction of answer digits correct, aligned from the units end. Shows graded degradation that exact match hides. |
+| **Hardness envelope H\*(ε)** | The largest operand length at which a model still exceeds accuracy ε. One comparable number per configuration. |
+| **Accuracy vs denoising passes** | Accuracy as a function of refinement passes *T*. A diffusion-only axis with no autoregressive equivalent; reported as a curve so no single favourable *T* is cherry-picked. |
 
-**~10 GB against a 300 GB group quota = ~3%.** Comfortably polite. (The original
-317-run plan with Small/Medium would have been ~200 GB, or 68% of the shared
-quota — another reason the scoped plan is the right call.)
+### Model and training
 
-Layout:
-
-```
-~                                            code, configs, results CSVs (10 GB, BACKED UP)
-/scratch/zt1/project/msml612/user/govind02/  env, caches, runs, checkpoints (300 GB shared)
-/afs/shell.umd.edu/project/msml612/          final ckpts + frozen splits w/ checksums (1 TB)
-$TMPDIR (node-local, ~11 TB)                 per-job data staging
-```
-
-⚠️ **Never build the conda env in `~`** — 5–15 GB and 100k–300k files against a
-10 GB / 650k-inode quota. Newest module is PyTorch 2.0.1 (2023), so you will
-need your own env. See [Zaratan README §6](../README.md) for the exact exports.
+6 layers, 384 hidden dimensions, 6 heads, ~10.7M parameters, symbol-level
+vocabulary built from the data. AdamW, learning rate 1e-4, 300-step warm-up then
+cosine decay, weight decay 0.01, bfloat16, effective batch 256, 10,000 steps on
+200,000 examples.
 
 ---
 
-## 9. Job template
+## 5. What we found
+
+### Positional encodings do not transfer between architectures
+
+Two schemes that give autoregressive models **100%** in-distribution accuracy
+leave masked diffusion **completely unable to learn the task — 0%, on every
+seed**: supplying no positional information at all, and sinusoidal encoding.
+
+The mechanism is straightforward. An autoregressive model reads tokens in order,
+so position is implicit in the act of reading; the literature showing that *no*
+positional encoding is best for length generalization rests on exactly that
+implicit signal. A diffusion model sees all positions simultaneously. Remove the
+positional signal and it is holding an unordered bag of digits.
+
+This matters practically: the best-performing encoding for autoregressive length
+generalization is **unavailable** to diffusion.
+
+### High seed variance
+
+On this task, one configuration spanned **3% to 68%** across seeds. Single-seed
+comparisons here — including published ones — should be treated with suspicion.
+Every number in this repository is reported as mean ± standard deviation over 3
+seeds.
+
+### Failure analysis drove the method
+
+Two of the three method components came directly from inspecting model outputs
+rather than from theory. The terminator fix in particular was invisible in the
+metrics: the model produced **perfectly correct digits** and was scored at 0%
+because the end-of-sequence marker landed in the wrong slot, being positionally
+indistinguishable from padding.
+
+Current numbers are in [`figures/summary.md`](https://huggingface.co/GOVINDFROM/masked-diffusion-length-generalization/blob/main/figures/summary.md).
+
+---
+
+## 6. Repository layout
+
+```
+src/
+  data.py            task generators: addition, multiplication, sorting, star-graph
+  model.py           transformer with swappable positional encoding + attention mask
+  train_add.py       main trainer (place-value ids, both architectures, all metrics)
+  train.py           earlier trainer for the sorting / star-graph studies
+  collect.py         aggregates every run into tables and figures
+  trace.py           prints a diffusion denoising trajectory
+  debug_coupled.py   prediction inspection used to find the terminator bug
+slurm/
+  grid.sh            the full 90-run grid
+  finalize.sh        runs automatically after training: back up + push
+push_to_hf.py        stage results and upload to the Hugging Face Hub
+```
+
+### Reproducing
 
 ```bash
-#!/bin/bash
-#SBATCH -J mdm-stargraph
-#SBATCH -t 12:00:00                  # NEVER omit: default is 15 min
-#SBATCH -c 8
-#SBATCH --mem=32g
-#SBATCH --gpus=a100_1g.5gb:1         # 7 SU/h, not 48
-#SBATCH -p gpu-a100_1g.5gb
-#SBATCH -o logs/%x-%j.out
-#SBATCH --array=0-2                  # seeds; use arrays, never 36 hand-submitted jobs
+# one run
+python src/train_add.py --mode diff --op add --pe alibi --coupled 1 \
+    --segments 1 --seed 0 --digits 5 --steps 10000 --out runs/demo
 
-source /etc/profile
-SCR=/scratch/zt1/project/msml612/user/$USER
-export HF_HOME=$SCR/hf PIP_CACHE_DIR=$SCR/pip_cache TORCH_HOME=$SCR/torch
-conda activate $SCR/envs/diffusion
+# the full grid (SLURM)
+sbatch slurm/grid.sh
 
-cp -r $SCR/data/stargraph $TMPDIR/            # stage to node-local
-python train.py --seed $SLURM_ARRAY_TASK_ID \
-                --data $TMPDIR/stargraph \
-                --out $SCR/runs/$SLURM_JOB_NAME-$SLURM_ARRAY_TASK_ID \
-                --save_total_limit 1
+# tables and figures
+RUNS=runs OUT=figures python src/collect.py
 ```
 
-Rules: right-size `-t` (the scheduler reserves against *requested* walltime and
-will block you and your classmates with `AssociationJobLimit`); use job arrays
-for sweeps; `sbalance` before and after every phase.
+---
+
+## 7. Honest limitations
+
+- **Arithmetic is a probe, not an application.** A 10.7M-parameter adder is
+  useless as a calculator. The claim is about the model class, not the task.
+- **Place-value numbering is not our idea** — only its adaptation to
+  bidirectional diffusion, and the accompanying negative transfer result.
+- **Nothing here reaches the very long lengths** reported by the best
+  autoregressive arithmetic work, which uses larger models and longer training.
+- **Multiplication is included precisely because it may not work**; if the method
+  only helps when place-value alignment matches the algorithm, that is a real
+  boundary and is reported as one.
 
 ---
 
-## 10. Risks
+## 8. References
 
-| Risk | Impact | Mitigation |
-|---|---|---|
-| **Classmates drain the shared 50 kSU** | **Fatal** | Not hypothetical — 67 users, no per-user caps, first-come-first-served. Front-load runs (pool was at 0.00 kSU on 2026-09-10). **Get the AAC allocation.** |
-| Measured cost ≫ estimate | High | Gate 0 exists for exactly this. Re-cost before Phase 1. |
-| H1 untestable on MGDM-format tasks | Medium | Already known (§3). Star-graph carries H1; H2 carries the paper. |
-| AOP (2606.00295) already tested OOD | High | **Check in week 1.** If so, narrow to the PE study + canvas analysis. |
-| PE spread negligible | Medium | Publish as a negative result — "bidirectional attention is insensitive to PE choice" contradicts a natural prediction and is genuinely interesting. |
-| No component beats baseline (G4 fails) | High | Pivot to the Tier-1 measurement paper. **Decide now you are willing to write it** — deciding under pressure in week 8 produces a worse paper. |
-| Reviewers demand scale beyond 6M | Medium | Preempt: MGDM's own headline is 6M diffusion > 303M AR. Add the scaling check if an AAC allocation lands. |
+- Austin et al. *Structured Denoising Diffusion Models in Discrete State-Spaces* (D3PM). NeurIPS 2021.
+- Sahoo et al. *Simple and Effective Masked Diffusion Language Models* (MDLM). NeurIPS 2024.
+- Ye et al. *Beyond Autoregression: Discrete Diffusion for Complex Reasoning and Planning*. ICLR 2025.
+- Kazemnejad et al. *The Impact of Positional Encoding on Length Generalization in Transformers*. 2023.
+- Press et al. *Train Short, Test Long: Attention with Linear Biases* (ALiBi). ICLR 2022.
+- Su et al. *RoFormer: Rotary Position Embedding*. 2021.
+- Ruoss et al. *Randomized Positional Encodings Boost Length Generalization*. ACL 2023.
+- Bachmann & Nagarajan. *The Pitfalls of Next-Token Prediction*. ICML 2024.
 
----
-
-## 11. Week-1 checklist
-
-1. **Ask the professor to apply for an AAC allocation** (50–550 kSU). Single
-   highest-leverage action in this document.
-2. **Get sign-off on spending ~10% of the class pool** — 67 people share it.
-3. **Read arXiv:2606.00295's experiments section.** Confirm it does not test
-   generalization to harder-than-trained instances. Load-bearing assumption.
-4. **Agree the tier structure with the professor.** Show them §7's gates. If
-   they will only accept a Tier-3 "we beat SOTA" result, you need to know in
-   week 1 — it changes the risk calculus and may argue for a safer task.
-5. Confirm the ARR 9-month gap does not block TACL submission.
-6. Run Gate 0 and replace every estimated SU number in §1 and §7.
-
----
-
-## 12. References
-
-**Core:** MGDM — Ye et al., ICLR 2025, arXiv:2410.14157,
-[HKUNLP/diffusion-vs-ar](https://github.com/HKUNLP/diffusion-vs-ar) (Apache-2.0) ·
-MDLM — Sahoo et al., NeurIPS 2024 ·
-BD3-LM — Arriola et al., ICLR 2025 · D3PM — Austin et al., NeurIPS 2021
-
-**Order (cite, don't re-claim):** Adaptive Order Policies — arXiv:2606.00295 ·
-Kim et al., ICML 2025, arXiv:2502.06768 · arXiv:2512.09106 · arXiv:2510.04525 ·
-arXiv:2511.19152 · arXiv:2509.01025
-
-**AR failure:** Bachmann & Nagarajan, ICML 2024, arXiv:2403.06963
-
-**PE / length generalization:** Kazemnejad et al., arXiv:2305.19466 (the causal
-reference point) · ALiBi, ICLR 2022 · RoPE, arXiv:2104.09864 · Randomized PE,
-ACL 2023 · MDLMPE, arXiv:2608.03769
-
-**Data:** Stream-of-Search, arXiv:2404.03683 ·
-[Next-Token-Failures](https://github.com/gregorbachmann/Next-Token-Failures) ·
-3-SAT generated by the MGDM repo
+Trained on the University of Maryland Zaratan cluster.

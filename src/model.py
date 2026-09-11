@@ -98,6 +98,11 @@ class Transformer(nn.Module):
         super().__init__()
         self.pe_kind, self.causal = pe, causal
         self.emb = nn.Embedding(vocab, d)
+        # Segment embedding: which part of the equation a token belongs to.
+        # Place-value ids deliberately collide across operands and answer, so a
+        # bidirectional model needs this to tell those tokens apart; a causal
+        # model gets the same information free from the attention mask.
+        self.seg = nn.Embedding(8, d)
         if pe == "ape":
             self.pos = nn.Embedding(max_len, d)
         elif pe == "sin":
@@ -114,9 +119,11 @@ class Transformer(nn.Module):
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def forward(self, idx, pad_mask=None, pos_ids=None):
+    def forward(self, idx, pad_mask=None, pos_ids=None, seg_ids=None):
         B, L = idx.shape
         x = self.emb(idx)
+        if seg_ids is not None:
+            x = x + self.seg(seg_ids)
         if self.pe_kind == "ape":
             p = torch.arange(L, device=idx.device)[None] if pos_ids is None else pos_ids
             x = x + self.pos(p)
