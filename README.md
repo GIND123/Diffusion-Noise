@@ -8,6 +8,7 @@ weights, no pretrained tokenizer, no distillation from a larger model. Models ar
 ~10.7M parameters and train in roughly 20 minutes on a single A100 MIG slice.
 
 - Code: this repository
+- **[Resuming on another machine](HANDOFF.md)** — start here after a device change
 - **[What's left before journal submission](SUBMISSION_ROADMAP.md)** — honest gap analysis
 - Weights, results and figures: [huggingface.co/GOVINDFROM/masked-diffusion-length-generalization](https://huggingface.co/GOVINDFROM/masked-diffusion-length-generalization)
 

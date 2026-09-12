@@ -11,11 +11,13 @@ copy-the-rest rule instead, so at inference it guesses (~1/deg accuracy).
 import numpy as np
 
 SPECIALS = ["[PAD]", "[MASK]", "|", ",", "=", "[EOS]", "+"]
+DIGITS = "0123456789abcdef"   # up to base 16
 
 
 class Tokenizer:
     def __init__(self, num_nodes=50):
-        self.itos = SPECIALS + [str(i) for i in range(num_nodes)]
+        self.itos = SPECIALS + ([DIGITS[i] for i in range(num_nodes)]
+                                if num_nodes <= 16 else [str(i) for i in range(num_nodes)])
         self.stoi = {s: i for i, s in enumerate(self.itos)}
         self.pad = self.stoi["[PAD]"]
         self.mask = self.stoi["[MASK]"]
@@ -110,7 +112,7 @@ def build_sort_dataset(n, num_nodes, k, max_prompt, canvas, seed=0):
 
 
 def build_op_dataset(n, digits, max_prompt, canvas, seed=0, exact=False,
-                     reverse=True, max_offset=8, op="add"):
+                     reverse=True, max_offset=8, op="add", base=10):
     """Place-value-aligned dataset for addition or multiplication.
 
     Multiplication is the harder case on purpose: its algorithm is NOT
@@ -118,7 +120,7 @@ def build_op_dataset(n, digits, max_prompt, canvas, seed=0, exact=False,
     whether the method works only when place-value alignment happens to match
     the algorithm's dependency structure.
     """
-    tok = Tokenizer(10)
+    tok = Tokenizer(16)          # vocabulary covers every base we support
     rng = np.random.default_rng(seed)
     P = np.full((n, max_prompt), tok.pad, dtype=np.int64)
     T = np.full((n, canvas), tok.pad, dtype=np.int64)

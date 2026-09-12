@@ -44,6 +44,18 @@ def get_args():
     p.add_argument("--warmup", type=int, default=300)
     p.add_argument("--T", type=int, default=16)
     p.add_argument("--eval_every", type=int, default=5000)
+    p.add_argument("--fixed_t", type=float, default=0.0,
+                   help="train the denoiser at a single noise level instead of sampling t. "
+                        "fixed_t=1.0 means every example is fully masked, i.e. one-shot "
+                        "bidirectional prediction with NO iterative refinement - which "
+                        "separates 'bidirectional attention' from 'multiple passes' as "
+                        "explanations for the diffusion advantage.")
+    p.add_argument("--base", type=int, default=10,
+                   help="numeric base; tests whether the effect is about place value in "
+                        "general or about decimal digits specifically")
+    p.add_argument("--per_instance", type=int, default=0,
+                   help="save per-instance correctness so confidence intervals can be "
+                        "bootstrapped over test items, not only over seeds")
     p.add_argument("--nfe_sweep", type=int, default=0,
                    help="accuracy-vs-denoising-passes sweep; 7x the eval cost, so off by default")
     p.add_argument("--out", default="runs/dev")
@@ -81,7 +93,8 @@ def load(n, digits, seed, exact, args):
                          task=args.op))
     P, T, pm, PP, TP, PS, TS, tok = build_op_dataset(
         n, digits, MAX_PROMPT, CANVAS, seed=seed, exact=exact, op=args.op,
-        reverse=True, max_offset=args.max_offset if args.coupled else 0)
+        reverse=True, max_offset=args.max_offset if args.coupled else 0,
+        base=args.base)
     return (torch.from_numpy(P), torch.from_numpy(T), torch.from_numpy(pm),
             torch.from_numpy(PP), torch.from_numpy(TP),
             torch.from_numpy(PS), torch.from_numpy(TS), tok)
@@ -130,7 +143,10 @@ def pad_mask_of(pmb, canvas, device):
 def diffusion_loss(model, P, T, pm, PP, TP, PS, TS, tok, args, device):
     B, canvas = T.shape
     t_min = 1.0 / canvas
-    t = t_min + (1.0 - t_min) * torch.rand(B, device=device)
+    if args.fixed_t > 0:
+        t = torch.full((B,), args.fixed_t, device=device)
+    else:
+        t = t_min + (1.0 - t_min) * torch.rand(B, device=device)
     noise = torch.rand(B, canvas, device=device) < t[:, None]
     noise[torch.arange(B, device=device), torch.randint(0, canvas, (B,), device=device)] = True
     x_t = torch.where(noise, torch.full_like(T, tok.mask), T)
@@ -219,6 +235,29 @@ def exact_match(pred, gold, tok):
     return sum(norm(p) == norm(g) for p, g in zip(pred.tolist(), gold.tolist())) / len(gold)
 
 
+def per_position_acc(pred, gold, tok):
+    """Accuracy at each answer position, units-first. Shows *where* long answers
+    break: leading digits, or everything past the trained length."""
+    def norm(seq):
+        seq = [x for x in seq if x != tok.pad]
+        return seq[: seq.index(tok.eos)] if tok.eos in seq else seq
+    num, den = {}, {}
+    for p, g in zip(pred.tolist(), gold.tolist()):
+        pn, gn = norm(p), norm(g)
+        for i in range(len(gn)):
+            den[i] = den.get(i, 0) + 1
+            if i < len(pn) and pn[i] == gn[i]:
+                num[i] = num.get(i, 0) + 1
+    return {i: num.get(i, 0) / den[i] for i in sorted(den)}
+
+
+def correct_flags(pred, gold, tok):
+    def norm(seq):
+        seq = [x for x in seq if x != tok.pad]
+        return seq[: seq.index(tok.eos)] if tok.eos in seq else seq
+    return [int(norm(p) == norm(g)) for p, g in zip(pred.tolist(), gold.tolist())]
+
+
 def digit_acc(pred, gold, tok):
     """Fraction of answer digits correct (partial credit), aligned from the
     units end. Exact match is the headline metric but hides how close a model
@@ -237,22 +276,30 @@ def digit_acc(pred, gold, tok):
 @torch.no_grad()
 def evaluate(model, args, tok, device):
     model.eval()
-    res, dres = {}, {}
+    res, dres, pres, flags = {}, {}, {}, {}
     for dd in TEST_DIGITS:
         P, T, pm, PP, TP, PS, TS, _ = load(args.n_eval, dd, 40_000 + dd, True, args)
-        accs, dgs = [], []
+        accs, dgs, poss, fl = [], [], [], []
         for i in range(0, len(P), args.eval_bs):
             sl = slice(i, i + args.eval_bs)
             ac = dict(device_type="cuda", dtype=torch.bfloat16) if device == "cuda" else dict(device_type="cpu", enabled=False)
             with torch.autocast(**ac):
                 f = sample_diffusion if args.mode == "diff" else sample_ar
                 pred = f(model, P[sl].to(device), pm[sl], PP[sl], TP[sl], PS[sl], TS[sl], tok, args, device)
-            accs.append(exact_match(pred, T[sl].to(device), tok))
-            dgs.append(digit_acc(pred, T[sl].to(device), tok))
+            gold = T[sl].to(device)
+            accs.append(exact_match(pred, gold, tok))
+            dgs.append(digit_acc(pred, gold, tok))
+            poss.append(per_position_acc(pred, gold, tok))
+            if args.per_instance:
+                fl += correct_flags(pred, gold, tok)
         res[f"d{dd}"] = float(np.mean(accs))
         dres[f"d{dd}"] = float(np.mean(dgs))
+        keys = sorted({k for d in poss for k in d})
+        pres[f"d{dd}"] = {str(k): float(np.mean([d[k] for d in poss if k in d])) for k in keys}
+        if args.per_instance:
+            flags[f"d{dd}"] = fl
     model.train()
-    return res, dres
+    return res, dres, pres, flags
 
 
 def main():
@@ -291,10 +338,10 @@ def main():
         if step % 500 == 0:
             print(f"step {step:6d} loss {tot:.4f} ({time.time()-t0:.0f}s)", flush=True)
         if (step + 1) % args.eval_every == 0:
-            e, _ = evaluate(model, args, tok, device)
+            e = evaluate(model, args, tok, device)[0]
             print(f"  EVAL {step+1}: {e}", flush=True)
 
-    final, dfinal = evaluate(model, args, tok, device)
+    final, dfinal, pfinal, iflags = evaluate(model, args, tok, device)
 
     # accuracy vs number of denoising passes (no autoregressive analogue)
     nfe = {}
@@ -302,7 +349,7 @@ def main():
         keep = args.T
         for t_steps in (1, 2, 4, 8, 16, 32):
             args.T = t_steps
-            e, _ = evaluate(model, args, tok, device)
+            e = evaluate(model, args, tok, device)[0]
             nfe[t_steps] = e
         args.T = keep
 
@@ -315,6 +362,7 @@ def main():
                "inference_passes_per_example": (args.T if args.mode == "diff" else CANVAS),
                "minutes": (time.time() - t0) / 60}
     json.dump({"args": vars(args), "final": final, "digit_acc": dfinal,
+               "per_position": pfinal, "instance_flags": iflags,
                "nfe": nfe, "compute": compute, "minutes": (time.time() - t0) / 60},
               open(os.path.join(args.out, "result.json"), "w"), indent=2)
     torch.save(model.state_dict(), os.path.join(args.out, "model.pt"))
