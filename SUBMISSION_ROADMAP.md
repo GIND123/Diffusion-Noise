@@ -3,15 +3,19 @@
 Honest gap analysis, updated 2026-09-12 after ~290 runs. Ordered by what would sink the paper
 first, not by effort.
 
-**Where we are:** 180 runs. Addition, subtraction, multiplication, sorting
-control. 5 positional encodings × 2 architectures × method/baseline, 3 seeds,
-component ablations, a length ladder to 20 digits, and a numerical audit.
+**Where we are:** ~290 runs. Addition (to 20 digits), subtraction,
+multiplication, parity, reverse, sorting control. 5 positional encodings × 2
+architectures × method/baseline, 3–5 seeds, component ablations, 3 model sizes,
+two published baselines reimplemented in-harness, bootstrap confidence
+intervals, a matched-compute table, a numerical audit, and a decoding-order
+analysis.
 
-**Blunt assessment:** the *science* is in reasonable shape. The *comparisons*
-are not. Every number so far compares our method against **our own** baseline.
-No published method has been run head-to-head. That is the single thing most
-likely to get this rejected, because our method is an adaptation of published
-autoregressive work and a reviewer will immediately ask how it compares.
+**Blunt assessment:** the comparisons gap is largely closed. Two risks remain.
+First, **no diffusion-side published baseline** (MGDM, Adaptive Order Policies)
+has been run — a reviewer of a diffusion paper will expect one. Second, and more
+interesting, **we can no longer explain our own result**: the obvious mechanism
+(better decoding order) was tested and refuted, so the paper currently reports an
+effect it cannot account for.
 
 ---
 
@@ -30,9 +34,9 @@ place-value scheme is close enough to position coupling that a reviewer may
 accept the concession in the README, but MGDM remains a genuine gap if the paper
 claims anything about diffusion planning.
 
-### 1.1b The original critical gap (for the record)
+<details><summary>Original gap list, for the record</summary>
 
-We must reproduce and compare, in our own harness, at matched compute:
+Reproduce and compare, in our own harness, at matched compute:
 
 | Method | Why it must be there |
 |---|---|
@@ -44,6 +48,8 @@ We must reproduce and compare, in our own harness, at matched compute:
 
 Reproducing published *numbers* is not enough — they must run inside our harness
 so the comparison is matched on data, parameters, and compute.
+
+</details>
 
 ### 1.2 Matched-compute accounting — ✅ done (Table 8)
 
@@ -127,17 +133,19 @@ This is the difference between "we measured an effect" and "we explained one."
 
 ---
 
-## Suggested order
+## Suggested order from here
 
-1. **Implement position coupling and Abacus in our harness** — without this the
-   contribution is unclear. Days, not weeks; both are positional-id schemes and
-   our code already supports custom identifiers.
-2. **Add one non-arithmetic task** (parity or SCAN) — cheap, removes the
-   "arithmetic-only" objection.
-3. **Matched-compute table + bootstrap confidence intervals** — mostly analysis
-   over runs we already have.
-4. **Decoding-order analysis** — converts a measurement into an explanation.
-5. Fold in scaling and denoising-pass results (launched).
+1. **Explain the effect.** Decoding order is ruled out. Separate the two
+   remaining candidates by ablating iterative refinement (vary T at fixed
+   training) against bidirectional attention. Highest scientific value, and the
+   paper is weaker without it.
+2. **One diffusion-side published baseline** — MGDM is the obvious choice, and
+   its repository is public and runs these task families.
+3. **Paired bootstrap over test instances**, not only over seeds.
+4. **One compositional task** (SCAN or PCFG) to move the claim beyond arithmetic
+   and place value.
+5. Failure analysis at 20 digits — per-digit accuracy is 68.9%, so *which*
+   digits fail is directly answerable from checkpoints we already have.
 
 ---
 
