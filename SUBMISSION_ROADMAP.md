@@ -1,6 +1,6 @@
 # Roadmap to a top-tier journal submission
 
-Honest gap analysis as of 2026-09-11. Ordered by what would sink the paper
+Honest gap analysis, updated 2026-09-12 after ~290 runs. Ordered by what would sink the paper
 first, not by effort.
 
 **Where we are:** 180 runs. Addition, subtraction, multiplication, sorting
@@ -17,7 +17,20 @@ autoregressive work and a reviewer will immediately ask how it compares.
 
 ## Tier 1 — Would cause rejection if missing
 
-### 1.1 Head-to-head against published methods ⚠️ **the critical gap**
+### 1.1 Head-to-head against published methods — ✅ **largely closed**
+
+Randomized PE (Ruoss 2023) and Abacus embeddings (McLeish 2024) are now
+reimplemented in our harness and compared at matched compute, with bootstrap
+confidence intervals. Our method wins on both architectures and the intervals
+against Abacus on diffusion do not overlap.
+
+Still open: **position coupling (Cho et al. 2024)** as a separately implemented
+variant, and **MGDM / Adaptive Order Policies** on the diffusion side. Our
+place-value scheme is close enough to position coupling that a reviewer may
+accept the concession in the README, but MGDM remains a genuine gap if the paper
+claims anything about diffusion planning.
+
+### 1.1b The original critical gap (for the record)
 
 We must reproduce and compare, in our own harness, at matched compute:
 
@@ -32,7 +45,7 @@ We must reproduce and compare, in our own harness, at matched compute:
 Reproducing published *numbers* is not enough — they must run inside our harness
 so the comparison is matched on data, parameters, and compute.
 
-### 1.2 Matched-compute accounting ⚠️
+### 1.2 Matched-compute accounting — ✅ done (Table 8)
 
 The most common reason diffusion-vs-autoregressive papers are rejected. We must
 report, in one table: non-embedding parameters (±5%), training FLOPs, tokens
@@ -43,18 +56,17 @@ per token — that must be stated explicitly, not buried.
 Partly addressed: the denoising-pass sweep is launched (grid 2, study G), which
 gives accuracy as a function of inference compute.
 
-### 1.3 Statistical rigor
+### 1.3 Statistical rigor — ✅ mostly closed
 
-Currently mean ± standard deviation over 3 seeds. Needed: **paired bootstrap
-over test instances with confidence intervals**, and significance tests on the
-headline gaps. Given we already found one configuration spanning 3%–68% across
+Bootstrap 95% confidence intervals over seeds are now reported for the
+published-baseline table, and the headline row has 5 seeds. Still worth adding:
+**paired bootstrap over test instances** (not just over seeds). Given we already found one configuration spanning 3%–68% across
 seeds, this matters more here than in a typical paper. Consider 5 seeds for
 headline rows.
 
-### 1.4 Scaling
+### 1.4 Scaling — ✅ done
 
-All headline numbers are 10.7M parameters. *Launched — grid 2, study F* covers
-10.7M / 25M / 85M. A reviewer will ask whether the effect is a small-model
+10.7M / 25M / 85M all run; see Table 9. A reviewer will ask whether the effect is a small-model
 artifact; without this the answer is "we don't know."
 
 ---
@@ -66,10 +78,11 @@ artifact; without this the answer is "we don't know."
 | Benchmark | Status | Why |
 |---|---|---|
 | Addition | ✅ done, to 20 digits | primary |
-| Subtraction | 🔄 launched (study H) | second place-local operation |
+| Subtraction | ✅ done | second place-local operation |
 | Multiplication | ✅ done — **fails** | boundary condition |
 | Sorting | ✅ done | order-insensitive control |
-| **Parity / copy / reverse** | ❌ | standard length-generalization probes, very cheap |
+| **Parity** | ✅ done — chain without alignment, barely helps |
+| **Reverse** | ✅ done — alignment without chain, **100% at 2× length** |
 | **SCAN or PCFG** | ❌ | compositional generalization; moves beyond arithmetic |
 | **Countdown / Sudoku / 3-SAT** (MGDM suite) | ❌ | lets us compare on *their* benchmark rather than only ours |
 
@@ -77,15 +90,19 @@ The arithmetic-only framing is the second-biggest risk after missing baselines.
 At least one non-arithmetic task is needed to claim the finding is about
 bidirectional generation rather than about digits.
 
-### 2.2 Mechanistic analysis — *why* diffusion wins
+### 2.2 Mechanistic analysis — ⚠️ **ran it; the obvious explanation is false**
 
-We have `src/trace.py` but have never run it at scale. Needed:
-- **Decoding-order analysis.** Does the diffusion model resolve low-order digits
-  first, i.e. discover the carry chain? This is the causal story behind the
-  headline number and currently it is asserted, not shown.
+`src/order_analysis.py` records the denoising pass at which each digit is fixed.
+The correlation between significance and reveal order is −0.40 (ours) and −0.32
+(baseline): near-identical, and opposite in sign to the carry-chain prediction.
+**Decoding order does not explain the diffusion advantage.**
+
+Remaining mechanistic work, now the most valuable open item:
+- Ablate *iterative refinement* (vary T at fixed training) against *bidirectional
+  attention* to separate the two candidate explanations
+- Attention-pattern inspection on place-value-aligned heads
 - **Failure analysis at 20 digits.** Per-digit accuracy is 68.9% — *which*
   digits fail? Leading digits? Positions past the training range?
-- **Attention inspection** on place-value-aligned heads.
 
 This is the difference between "we measured an effect" and "we explained one."
 
