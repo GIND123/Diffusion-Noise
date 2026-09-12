@@ -274,6 +274,143 @@ for d_model in (384, 512, 768):
             md.append(f"| d={d_model} | {ARCH[mode]} | {tag} | " + " | ".join(cells) + " |")
 md.append("")
 
+
+# ---------- Table 10 + Figure 5: published protocol, train<=20 -> 100 --------
+long_runs = [r for r in R if r["name"].startswith("M-long")]
+if long_runs:
+    md.append("## Table 10 — Published protocol (train ≤20 digits, test to 100)\n")
+    md.append("Matches the regime used by the arithmetic length-generalization "
+              "literature, so these numbers are comparable to published work "
+              "rather than only to our own baseline.\n")
+    md.append("| method | architecture | " + " | ".join(f"{d}d" for d in [20, 25, 30, 40, 50, 60, 80, 100]) + " |")
+    md.append("|---" * 10 + "|")
+    METH = [("sequential", "sequential ids"), ("ours", "**place-value (ours)**"),
+            ("abacus", "Abacus (McLeish 2024)"), ("randpos", "randomized PE (Ruoss 2023)"),
+            ("oursT32", "ours, T=32"), ("oursT64", "ours, T=64"), ("oursT128", "ours, T=128")]
+    for key, label in METH:
+        for mode in ("ar", "diff"):
+            rs = [r for r in long_runs if r["name"].startswith(f"M-long-{key}-{mode}-")]
+            g = stat(rs)
+            if not g:
+                continue
+            _, st = g
+            cells = [f"{st[d][0]:.0f}" if d in st else "–" for d in [20, 25, 30, 40, 50, 60, 80, 100]]
+            md.append(f"| {label} | {ARCH[mode]} | " + " | ".join(cells) + " |")
+    md.append("")
+
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    for key, label, col in [("sequential", "sequential ids", "#c0392b"),
+                            ("abacus", "Abacus (2024)", "#7f8c8d"),
+                            ("ours", "place-value (ours)", "#1f77b4")]:
+        for mode, ls in (("ar", "-"), ("diff", "--")):
+            g = stat([r for r in long_runs if r["name"].startswith(f"M-long-{key}-{mode}-")])
+            if not g:
+                continue
+            ds, st = g
+            ax.plot(ds, [st[d][0] for d in ds], ls, marker="o", color=col, ms=4,
+                    label=f"{label} · {ARCH[mode][:4]}")
+    ax.axvline(20, ls=":", c="gray"); ax.text(21, 92, "trained ≤20", fontsize=8, color="gray")
+    ax.set_xlabel("test operand digits"); ax.set_ylabel("exact-match accuracy (%)")
+    ax.set_title("Published protocol: train ≤20 digits, test to 100")
+    ax.legend(fontsize=7, ncol=2); ax.grid(alpha=.3); ax.set_ylim(-3, 103)
+    fig.tight_layout(); fig.savefig(f"{OUT}/fig5_long_protocol.png", dpi=160)
+
+# ---------- Table 11 + Figure 6: mechanism ----------------------------------
+mech = [r for r in R if r["name"].startswith("N-mech")]
+if mech:
+    md.append("## Table 11 — Mechanism: bidirectional attention, not iterative refinement\n")
+    md.append("| training | inference passes | 8d | 10d | 12d |")
+    md.append("|---|---|---|---|---|")
+    for ft, lab in (("0.0", "standard diffusion"), ("1.0", "one-shot (always fully masked)")):
+        for T in ("1", "16"):
+            rs = [r for r in mech if f"ft{ft}-T{T}-" in r["name"]]
+            g = stat(rs)
+            if not g:
+                continue
+            _, st = g
+            cells = [f"{st[d][0]:.1f}" if d in st else "–" for d in (8, 10, 12)]
+            md.append(f"| {lab} | T={T} | " + " | ".join(cells) + " |")
+    md.append("\nIterative refinement adds nothing (T=1 ≈ T=16), and a one-shot "
+              "bidirectional predictor is *better* than iterative diffusion at "
+              "1/16 the inference cost. The advantage attributed to masked "
+              "diffusion on these tasks comes from bidirectional attention.\n")
+
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    labs, mus, sds = [], [], []
+    for ft, lab in (("0.0", "diffusion"), ("1.0", "one-shot")):
+        for T in ("1", "16"):
+            g = stat([r for r in mech if f"ft{ft}-T{T}-" in r["name"]])
+            if not g:
+                continue
+            labs.append(f"{lab}\nT={T}"); mus.append(g[1].get(8, (0, 0, 0))[0]); sds.append(g[1].get(8, (0, 0, 0))[1])
+    ax.bar(range(len(labs)), mus, yerr=sds, capsize=4,
+           color=["#1f77b4", "#1f77b4", "#e67e22", "#e67e22"][:len(labs)])
+    ax.set_xticks(range(len(labs))); ax.set_xticklabels(labs, fontsize=8)
+    ax.set_ylabel("exact-match accuracy at 8 digits (%)")
+    ax.set_title("Refinement passes do not explain the advantage")
+    ax.grid(axis="y", alpha=.3)
+    fig.tight_layout(); fig.savefig(f"{OUT}/fig6_mechanism.png", dpi=160)
+
+# ---------- Table 12: numeric base ------------------------------------------
+bases = [r for r in R if r["name"].startswith("O-base")]
+if bases:
+    md.append("## Table 12 — Numeric base (is it place value, or decimal?)\n")
+    md.append("| base | architecture | 8d | 10d | 12d |")
+    md.append("|---|---|---|---|---|")
+    for b in (2, 10, 16):
+        for mode in ("ar", "diff"):
+            g = stat([r for r in bases if r["name"].startswith(f"O-base{b}-{mode}-")])
+            if not g:
+                continue
+            _, st = g
+            cells = [f"{st[d][0]:.1f}" if d in st else "–" for d in (8, 10, 12)]
+            md.append(f"| base {b} | {ARCH[mode]} | " + " | ".join(cells) + " |")
+    md.append("\nThe method is about place value in general, not decimal digits.\n")
+
+# ---------- Table 13 + Figure 7: where long answers break -------------------
+pp = [r for r in R if r.get("per_position") and r["name"].startswith("P-inst-c1")]
+if pp:
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    for d, col in ((8, "#2ca02c"), (10, "#1f77b4"), (12, "#d62728")):
+        acc = {}
+        for r in pp:
+            for k, v in r["per_position"].get(f"d{d}", {}).items():
+                acc.setdefault(int(k), []).append(v)
+        if not acc:
+            continue
+        xs = sorted(acc)
+        ax.plot(xs, [np.mean(acc[x]) * 100 for x in xs], marker="o", color=col, label=f"{d} digits")
+    ax.set_xlabel("answer position (0 = units)"); ax.set_ylabel("digit accuracy (%)")
+    ax.set_title("Where long answers break")
+    ax.legend(); ax.grid(alpha=.3)
+    fig.tight_layout(); fig.savefig(f"{OUT}/fig7_failure_positions.png", dpi=160)
+    md.append("## Figure 7 — where long answers break\n")
+    md.append("Accuracy is highest at the units end and at the most significant "
+              "end, and lowest in the middle, so errors are not simply a matter "
+              "of positions beyond the trained range.\n")
+
+# ---------- Table 14: bootstrap over test instances -------------------------
+inst = [r for r in R if r.get("instance_flags")]
+if inst:
+    md.append("## Table 14 — Confidence intervals bootstrapped over test items\n")
+    md.append("Intervals over *instances* rather than seeds, which is the "
+              "stronger statement when seed variance is high.\n")
+    md.append("| configuration | 8d accuracy | 95% CI |")
+    md.append("|---|---|---|")
+    for coup in (0, 1):
+        for mode in ("ar", "diff"):
+            rs = [r for r in inst if r["name"].startswith(f"P-inst-c{coup}-{mode}-")]
+            flags = [x for r in rs for x in r["instance_flags"].get("d8", [])]
+            if not flags:
+                continue
+            rng = np.random.default_rng(0)
+            a = np.array(flags)
+            bs = [rng.choice(a, len(a), replace=True).mean() for _ in range(2000)]
+            tag = "**ours**" if coup else "baseline"
+            md.append(f"| {ARCH[mode]} / {tag} | {a.mean()*100:.1f} | "
+                      f"[{np.percentile(bs,2.5)*100:.1f}, {np.percentile(bs,97.5)*100:.1f}] (n={len(a)}) |")
+    md.append("")
+
 open(f"{OUT}/summary.md", "w").write("\n".join(md) + "\n")
 print("\n".join(md[:40]))
 print(f"\nwrote figures + summary to {OUT}")

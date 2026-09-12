@@ -50,6 +50,9 @@ def get_args():
                         "bidirectional prediction with NO iterative refinement - which "
                         "separates 'bidirectional attention' from 'multiple passes' as "
                         "explanations for the diffusion advantage.")
+    p.add_argument("--ladder", choices=["short", "long"], default="short",
+                   help="long = train <=20 digits, test to 100, matching the published "
+                        "arithmetic length-generalization protocol")
     p.add_argument("--base", type=int, default=10,
                    help="numeric base; tests whether the effect is about place value in "
                         "general or about decimal digits specifically")
@@ -64,6 +67,15 @@ def get_args():
 
 # Ladder and canvas depend on the operation: multiplication answers are twice
 # as long as their operands, so it uses a shorter ladder to keep cost sane.
+# "long" matches the protocol used by the published arithmetic work (Abacus
+# trains on <=20 digits and reports generalization to 120), so our numbers are
+# comparable to theirs rather than only to our own baseline.
+LADDER_LONG = {"add": [20, 25, 30, 40, 50, 60, 80, 100],
+               "sub": [20, 25, 30, 40, 50, 60, 80, 100],
+               "mul": [5, 6, 7, 8, 10],
+               "parity": [20, 30, 40, 60, 80, 100],
+               "reverse": [20, 30, 40, 60, 80, 100]}
+
 LADDER = {"add": [5, 6, 7, 8, 10, 12, 15, 20],
           "sub": [5, 6, 7, 8, 10, 12, 15, 20],
           "mul": [3, 4, 5, 6, 7],
@@ -72,9 +84,9 @@ LADDER = {"add": [5, 6, 7, 8, 10, 12, 15, 20],
 TEST_DIGITS, MAX_TEST, MAX_PROMPT, CANVAS = None, None, None, None
 
 
-def set_sizes(op):
+def set_sizes(op, ladder="short"):
     global TEST_DIGITS, MAX_TEST, MAX_PROMPT, CANVAS
-    TEST_DIGITS = LADDER[op]
+    TEST_DIGITS = (LADDER_LONG if ladder == "long" else LADDER)[op]
     MAX_TEST = max(TEST_DIGITS)
     if op in ("parity", "reverse"):
         MAX_PROMPT = MAX_TEST + 2
@@ -304,7 +316,7 @@ def evaluate(model, args, tok, device):
 
 def main():
     args = get_args()
-    set_sizes(args.op)
+    set_sizes(args.op, args.ladder)
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.out, exist_ok=True)

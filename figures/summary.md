@@ -104,3 +104,57 @@ Both arms share one transformer, identical data, optimizer and step count. Diffu
 | d=768 | Masked diffusion | baseline | 9.5 | 0.0 | 0.0 |
 | d=768 | Masked diffusion | **ours** | 99.7 | 73.8 | 21.8 |
 
+## Table 10 — Published protocol (train ≤20 digits, test to 100)
+
+Matches the regime used by the arithmetic length-generalization literature, so these numbers are comparable to published work rather than only to our own baseline.
+
+| method | architecture | 20d | 25d | 30d | 40d | 50d | 60d | 80d | 100d |
+|---|---|---|---|---|---|---|---|---|---|
+| sequential ids | Autoregressive | 66 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| sequential ids | Masked diffusion | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| **place-value (ours)** | Autoregressive | 100 | 98 | 68 | 67 | 66 | 65 | 61 | 48 |
+| **place-value (ours)** | Masked diffusion | 100 | 100 | 90 | 49 | 8 | 1 | 0 | 0 |
+| Abacus (McLeish 2024) | Autoregressive | 85 | 29 | 1 | 0 | 0 | 0 | 0 | 0 |
+| Abacus (McLeish 2024) | Masked diffusion | 100 | 80 | 41 | 1 | 0 | 0 | 0 | 0 |
+| randomized PE (Ruoss 2023) | Autoregressive | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| randomized PE (Ruoss 2023) | Masked diffusion | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+## Table 11 — Mechanism: bidirectional attention, not iterative refinement
+
+| training | inference passes | 8d | 10d | 12d |
+|---|---|---|---|---|
+| standard diffusion | T=1 | 76.0 | 32.0 | 10.0 |
+| standard diffusion | T=16 | 78.5 | 34.3 | 11.2 |
+| one-shot (always fully masked) | T=1 | 86.8 | 42.7 | 14.8 |
+| one-shot (always fully masked) | T=16 | 2.2 | 0.7 | 0.3 |
+
+Iterative refinement adds nothing (T=1 ≈ T=16), and a one-shot bidirectional predictor is *better* than iterative diffusion at 1/16 the inference cost. The advantage attributed to masked diffusion on these tasks comes from bidirectional attention.
+
+## Table 12 — Numeric base (is it place value, or decimal?)
+
+| base | architecture | 8d | 10d | 12d |
+|---|---|---|---|---|
+| base 2 | Autoregressive | 18.5 | 3.2 | 0.8 |
+| base 2 | Masked diffusion | 73.5 | 38.8 | 21.5 |
+| base 10 | Autoregressive | 39.2 | 0.2 | 0.0 |
+| base 10 | Masked diffusion | 78.5 | 34.3 | 11.2 |
+| base 16 | Autoregressive | 14.0 | 0.2 | 0.0 |
+| base 16 | Masked diffusion | 66.2 | 22.2 | 5.8 |
+
+The method is about place value in general, not decimal digits.
+
+## Figure 7 — where long answers break
+
+Accuracy is highest at the units end and at the most significant end, and lowest in the middle, so errors are not simply a matter of positions beyond the trained range.
+
+## Table 14 — Confidence intervals bootstrapped over test items
+
+Intervals over *instances* rather than seeds, which is the stronger statement when seed variance is high.
+
+| configuration | 8d accuracy | 95% CI |
+|---|---|---|
+| Autoregressive / baseline | 0.0 | [0.0, 0.0] (n=1500) |
+| Masked diffusion / baseline | 0.0 | [0.0, 0.0] (n=1500) |
+| Autoregressive / **ours** | 39.7 | [37.2, 42.1] (n=1500) |
+| Masked diffusion / **ours** | 80.3 | [78.3, 82.2] (n=1500) |
+
