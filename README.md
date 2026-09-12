@@ -265,11 +265,15 @@ At small scale (train ≤5 digits) masked diffusion clearly beats autoregressive
 75.3% vs 10.5% at 8 digits. Under the 20-digit protocol the ordering **reverses**:
 autoregressive reaches 100 digits while diffusion stalls near 50.
 
-A caveat we are testing rather than asserting: the diffusion sampler used a fixed
-T=16 budget for a 103-slot canvas, so it had to commit ~6–7 digits per pass with
-carries unresolved between them. T-scaled runs (T = 32/64/128) are in flight; if
-they close the gap, the reversal is an artefact of our sampling budget rather than
-a property of the architecture.
+We tested the obvious confound — that a fixed T=16 budget starved a 103-slot
+canvas of refinement — by rerunning at T = 32, 64 and 128. **It changes nothing:**
+all four budgets land within noise of each other (≈50% at 40 digits, ≈8% at 50,
+0% at 80+). Eight times the inference compute buys nothing.
+
+The reversal is therefore a property of the architecture at this scale, not an
+artefact of our sampler. It also independently confirms the mechanism result
+below: refinement passes do not contribute, whether measured at 5-digit or
+20-digit training.
 
 ### Positional encodings do not transfer between architectures
 
@@ -508,6 +512,9 @@ Matches the regime used by the arithmetic length-generalization literature, so t
 | Abacus (McLeish 2024) | Masked diffusion | 100 | 80 | 41 | 1 | 0 | 0 | 0 | 0 |
 | randomized PE (Ruoss 2023) | Autoregressive | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | randomized PE (Ruoss 2023) | Masked diffusion | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| ours, T=32 | Masked diffusion | 100 | 100 | 91 | 48 | 6 | 1 | 0 | 0 |
+| ours, T=64 | Masked diffusion | 100 | 100 | 94 | 49 | 7 | 1 | 0 | 0 |
+| ours, T=128 | Masked diffusion | 100 | 100 | 94 | 49 | 8 | 1 | 0 | 0 |
 
 ## Table 11 — Mechanism: bidirectional attention, not iterative refinement
 

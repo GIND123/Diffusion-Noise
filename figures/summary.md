@@ -118,6 +118,9 @@ Matches the regime used by the arithmetic length-generalization literature, so t
 | Abacus (McLeish 2024) | Masked diffusion | 100 | 80 | 41 | 1 | 0 | 0 | 0 | 0 |
 | randomized PE (Ruoss 2023) | Autoregressive | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | randomized PE (Ruoss 2023) | Masked diffusion | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| ours, T=32 | Masked diffusion | 100 | 100 | 91 | 48 | 6 | 1 | 0 | 0 |
+| ours, T=64 | Masked diffusion | 100 | 100 | 94 | 49 | 7 | 1 | 0 | 0 |
+| ours, T=128 | Masked diffusion | 100 | 100 | 94 | 49 | 8 | 1 | 0 | 0 |
 
 ## Table 11 — Mechanism: bidirectional attention, not iterative refinement
 
