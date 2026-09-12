@@ -127,7 +127,7 @@ def build_op_dataset(n, digits, max_prompt, canvas, seed=0, exact=False,
     PS = np.zeros((n, max_prompt), dtype=np.int64)
     TS = np.zeros((n, canvas), dtype=np.int64)
     pmask = np.zeros((n, max_prompt), dtype=bool)
-    sym = "+" if op == "add" else "|"     # reuse an existing vocab symbol
+    sym = {"add": "+", "mul": "|", "sub": ","}[op]   # reuse existing vocab symbols
 
     for i in range(n):
         d = digits if exact else int(rng.integers(1, digits + 1))
@@ -140,7 +140,11 @@ def build_op_dataset(n, digits, max_prompt, canvas, seed=0, exact=False,
             return "".join(str(int(x)) for x in ds)
         pa, pb = draw(d), draw(d)
         a, b = int(pa), int(pb)
-        ps = str(a + b if op == "add" else a * b)
+        if op == "sub":
+            if int(pa) < int(pb):          # keep results non-negative
+                pa, pb = pb, pa
+            a, b = int(pa), int(pb)
+        ps = str({"add": a + b, "mul": a * b, "sub": a - b}[op])
         off = int(rng.integers(0, max_offset + 1))
 
         prompt, ppos, pseg = [], [], []

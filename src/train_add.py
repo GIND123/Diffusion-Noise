@@ -22,7 +22,9 @@ def get_args():
     p.add_argument("--mode", choices=["ar", "diff"], required=True)
     p.add_argument("--pe", default="ape", choices=["nope", "ape", "sin", "rope", "alibi"])
     p.add_argument("--coupled", type=int, default=1)
-    p.add_argument("--op", choices=["add", "mul"], default="add")
+    p.add_argument("--op", choices=["add", "mul", "sub"], default="add")
+    p.add_argument("--randpos", type=int, default=0,
+                   help="randomized positional encodings (Ruoss et al. 2023): sample a sorted\n                         random subset of a much larger index range, so large indices are seen\n                         in training. A published length-generalization baseline.")
     p.add_argument("--segments", type=int, default=1)
     p.add_argument("--max_offset", type=int, default=20)
     p.add_argument("--digits", type=int, default=5)
@@ -48,7 +50,9 @@ def get_args():
 
 # Ladder and canvas depend on the operation: multiplication answers are twice
 # as long as their operands, so it uses a shorter ladder to keep cost sane.
-LADDER = {"add": [5, 6, 7, 8, 10, 12, 15, 20], "mul": [3, 4, 5, 6, 7]}
+LADDER = {"add": [5, 6, 7, 8, 10, 12, 15, 20],
+          "sub": [5, 6, 7, 8, 10, 12, 15, 20],
+          "mul": [3, 4, 5, 6, 7]}
 TEST_DIGITS, MAX_TEST, MAX_PROMPT, CANVAS = None, None, None, None
 
 
@@ -57,7 +61,7 @@ def set_sizes(op):
     TEST_DIGITS = LADDER[op]
     MAX_TEST = max(TEST_DIGITS)
     MAX_PROMPT = 2 * MAX_TEST + 2
-    CANVAS = (MAX_TEST + 3) if op == "add" else (2 * MAX_TEST + 3)
+    CANVAS = (2 * MAX_TEST + 3) if op == "mul" else (MAX_TEST + 3)
 
 
 def load(n, digits, seed, exact, args):
@@ -71,6 +75,13 @@ def load(n, digits, seed, exact, args):
 
 def pos_for(PPb, TPb, args, device):
     """Full-sequence position ids, or None to fall back to sequence index."""
+    if args.randpos:
+        B = PPb.shape[0]
+        L = PPb.shape[1] + TPb.shape[1]
+        hi = 4 * L
+        idx = torch.stack([torch.randperm(hi, device=device)[:L].sort().values
+                           for _ in range(B)])
+        return idx
     if not args.coupled:
         return None
     return torch.cat([PPb, TPb], 1).to(device)
@@ -209,7 +220,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     P, T, pm, PP, TP, PS, TS, tok = load(args.n_train, args.digits, args.seed, False, args)
-    max_len = MAX_PROMPT + CANVAS + args.max_offset + MAX_TEST + 8
+    max_len = 4 * (MAX_PROMPT + CANVAS) + 8 if args.randpos else \
+              MAX_PROMPT + CANVAS + args.max_offset + MAX_TEST + 8
     model = Transformer(len(tok), args.d, args.layers, args.heads, args.pe,
                         causal=(args.mode == "ar"), max_len=max_len).to(device)
     print(f"[{args.mode}/{args.pe}/coupled={args.coupled}] params={model.n_params()/1e6:.2f}M "

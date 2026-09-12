@@ -8,6 +8,7 @@ weights, no pretrained tokenizer, no distillation from a larger model. Models ar
 ~10.7M parameters and train in roughly 20 minutes on a single A100 MIG slice.
 
 - Code: this repository
+- **[What's left before journal submission](SUBMISSION_ROADMAP.md)** — honest gap analysis
 - Weights, results and figures: [huggingface.co/GOVINDFROM/masked-diffusion-length-generalization](https://huggingface.co/GOVINDFROM/masked-diffusion-length-generalization)
 
 ---
@@ -95,6 +96,83 @@ directly out of the failure analysis in §5.
 > diffusion — which does not work without the segment component — together with
 > the evidence that naive transfer of positional schemes across the two
 > architectures fails.
+
+---
+
+## 3b. System architecture
+
+```
+ INPUT  "47 + 85 ="                        four parallel signals per token
+ ─────────────────────────────────────────────────────────────────────────
+   token id      4    7    +    8    5    =   [M]  [M]  [M]      symbol-level
+   place value   2    1    0    2    1    0    3    2    1   ←── OUR AXIS
+   segment       A    A    –    B    B    –   ANS  ANS  ANS  ←── OUR AXIS
+   offset        + r  (one random constant per example, added to place value)
+ ─────────────────────────────────────────────────────────────────────────
+              embedding sum  →  6 × transformer block  →  vocabulary logits
+                                 (attention mask is the ONLY architectural
+                                  difference between the two arms)
+ ─────────────────────────────────────────────────────────────────────────
+   AUTOREGRESSIVE                    │   MASKED DIFFUSION
+   causal mask                       │   bidirectional mask
+   next-token cross-entropy          │   absorbing-state denoising, 1/t weight
+   greedy left-to-right, no revision │   T confidence-ordered refinement passes
+```
+
+**Every arm shares one transformer.** Swapping between them changes the
+attention mask and the loss, nothing else — so any measured difference is
+attributable to generation strategy rather than capacity, data, or optimizer.
+
+### The four signals
+
+1. **Token identity** — symbol-level, vocabulary built from the data. No
+   pretrained tokenizer.
+2. **Place-value identifier** — a digit's significance, not its sequence index.
+   This makes the carry rule length-invariant.
+3. **Segment identifier** — operand A, operand B, or answer. Necessary because
+   place-value identifiers *deliberately collide* across the three.
+4. **Random offset** — a per-example constant added to all place values, so the
+   model learns relative significance and sees large indices during training.
+
+### Why the pieces are load-bearing (measured, not asserted)
+
+| Remove | Autoregressive | Diffusion |
+|---|---|---|
+| place value → sequential | 35.2% @ 6d | 55.0% @ 6d |
+| segment identifiers | **0% @ 6d** | 72.0% @ 6d |
+| random offset | 99.0% @ 6d | 99.5% @ 6d |
+| nothing (full method) | 99.5% @ 6d | 100% @ 6d |
+
+---
+
+## 3c. How this differs from existing work
+
+### What we do *not* claim
+
+Numbering arithmetic tokens by place value is established for **autoregressive**
+models — position coupling (Cho et al. 2024) and Abacus embeddings (McLeish et
+al. 2024) both do essentially this, and reach far longer operands than we report.
+We are not claiming that idea, and a paper that did would be rejected on sight.
+Masked diffusion (MDLM, Sahoo et al. 2024) and each individual positional
+encoding are likewise prior work.
+
+### What is new here
+
+| Contribution | Status in prior work |
+|---|---|
+| **Place-value identifiers under *bidirectional* attention** | Untouched. Every prior arithmetic length-generalization result uses causal attention. |
+| **Positional encodings do not transfer across the two architectures** — a scheme giving 98.8% autoregressive gives **0%** diffusion | Not reported. The standard justification for no-positional-encoding rests on the causal mask, which diffusion lacks; nobody had tested the consequence. |
+| **Diffusion benefits *more* than autoregressive from place-value alignment** (84.8% vs 52.3% @ 8d; 32.0% vs 5.7% @ 10d) | Not reported. Prior diffusion-vs-autoregressive results are entirely in-distribution. |
+| **Segment identifiers are required once place values collide** | Not applicable to prior causal work, which disambiguates via the attention mask for free. |
+| **The method fails when place value is not the algorithm** (multiplication) | A boundary condition nobody has drawn. |
+
+### The one-sentence claim
+
+> Place-value position identifiers transfer to masked diffusion language models,
+> where they yield *larger* length-generalization gains than in the
+> autoregressive setting they were designed for — and the positional-encoding
+> choices that work for autoregressive models do not carry over, one of them
+> failing completely.
 
 ---
 
