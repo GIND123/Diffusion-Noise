@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import build_op_dataset, Tokenizer
+from data import build_op_dataset, build_seq_dataset, Tokenizer
 from model import Transformer
 
 
@@ -22,10 +22,12 @@ def get_args():
     p.add_argument("--mode", choices=["ar", "diff"], required=True)
     p.add_argument("--pe", default="ape", choices=["nope", "ape", "sin", "rope", "alibi"])
     p.add_argument("--coupled", type=int, default=1)
-    p.add_argument("--op", choices=["add", "mul", "sub"], default="add")
+    p.add_argument("--op", choices=["add", "mul", "sub", "parity", "reverse"], default="add")
     p.add_argument("--randpos", type=int, default=0,
                    help="randomized positional encodings (Ruoss et al. 2023): sample a sorted\n                         random subset of a much larger index range, so large indices are seen\n                         in training. A published length-generalization baseline.")
     p.add_argument("--segments", type=int, default=1)
+    p.add_argument("--abacus", type=int, default=0,
+                   help="Abacus-style (McLeish et al. 2024): significance as a learned\n                         embedding added to the token embedding, rather than as position ids")
     p.add_argument("--max_offset", type=int, default=20)
     p.add_argument("--digits", type=int, default=5)
     p.add_argument("--seed", type=int, default=0)
@@ -52,7 +54,9 @@ def get_args():
 # as long as their operands, so it uses a shorter ladder to keep cost sane.
 LADDER = {"add": [5, 6, 7, 8, 10, 12, 15, 20],
           "sub": [5, 6, 7, 8, 10, 12, 15, 20],
-          "mul": [3, 4, 5, 6, 7]}
+          "mul": [3, 4, 5, 6, 7],
+          "parity": [10, 12, 15, 20, 30, 40],
+          "reverse": [10, 12, 15, 20, 30, 40]}
 TEST_DIGITS, MAX_TEST, MAX_PROMPT, CANVAS = None, None, None, None
 
 
@@ -60,11 +64,21 @@ def set_sizes(op):
     global TEST_DIGITS, MAX_TEST, MAX_PROMPT, CANVAS
     TEST_DIGITS = LADDER[op]
     MAX_TEST = max(TEST_DIGITS)
-    MAX_PROMPT = 2 * MAX_TEST + 2
-    CANVAS = (2 * MAX_TEST + 3) if op == "mul" else (MAX_TEST + 3)
+    if op in ("parity", "reverse"):
+        MAX_PROMPT = MAX_TEST + 2
+        CANVAS = MAX_TEST + 3
+    else:
+        MAX_PROMPT = 2 * MAX_TEST + 2
+        CANVAS = (2 * MAX_TEST + 3) if op == "mul" else (MAX_TEST + 3)
 
 
 def load(n, digits, seed, exact, args):
+    if args.op in ("parity", "reverse"):
+        return tuple(torch.from_numpy(x) if hasattr(x, "shape") else x
+                     for x in build_seq_dataset(
+                         n, digits, MAX_PROMPT, CANVAS, seed=seed, exact=exact,
+                         max_offset=args.max_offset if args.coupled else 0,
+                         task=args.op))
     P, T, pm, PP, TP, PS, TS, tok = build_op_dataset(
         n, digits, MAX_PROMPT, CANVAS, seed=seed, exact=exact, op=args.op,
         reverse=True, max_offset=args.max_offset if args.coupled else 0)
@@ -75,14 +89,27 @@ def load(n, digits, seed, exact, args):
 
 def pos_for(PPb, TPb, args, device):
     """Full-sequence position ids, or None to fall back to sequence index."""
+    if args.abacus:
+        return None          # Abacus keeps sequence-index positions
     if args.randpos:
         B = PPb.shape[0]
         L = PPb.shape[1] + TPb.shape[1]
         hi = 4 * L
-        idx = torch.stack([torch.randperm(hi, device=device)[:L].sort().values
-                           for _ in range(B)])
+        # Seeded per call so a whole generation shares one assignment; training
+        # still varies it across batches because the seed follows the data.
+        g = torch.Generator(device="cpu").manual_seed(int(PPb.sum().item()) % (2**31))
+        idx = torch.stack([torch.randperm(hi, generator=g)[:L].sort().values
+                           for _ in range(B)]).to(device)
         return idx
     if not args.coupled:
+        return None
+    return torch.cat([PPb, TPb], 1).to(device)
+
+
+def abacus_for(PPb, TPb, args, device):
+    """Significance ids for the Abacus variant. Same information as the
+    place-value ids, delivered as a token embedding instead of a position."""
+    if not args.abacus:
         return None
     return torch.cat([PPb, TPb], 1).to(device)
 
@@ -109,7 +136,8 @@ def diffusion_loss(model, P, T, pm, PP, TP, PS, TS, tok, args, device):
     x_t = torch.where(noise, torch.full_like(T, tok.mask), T)
     logits = model(torch.cat([P, x_t], 1), pad_mask_of(pm, canvas, device),
                    pos_for(PP, TP, args, device),
-                   seg_for(PS, TS, args, device))[:, P.shape[1]:]
+                   seg_for(PS, TS, args, device),
+                   abacus_for(PP, TP, args, device))[:, P.shape[1]:]
     ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), T.reshape(-1), reduction="none")
     ce = (ce.view(B, canvas) * noise).sum(1)
     return ((1.0 / t) * ce / canvas).mean()
@@ -119,7 +147,8 @@ def ar_loss(model, P, T, pm, PP, TP, PS, TS, tok, args, device):
     canvas = T.shape[1]
     logits = model(torch.cat([P, T], 1), pad_mask_of(pm, canvas, device),
                    pos_for(PP, TP, args, device),
-                   seg_for(PS, TS, args, device))
+                   seg_for(PS, TS, args, device),
+                   abacus_for(PP, TP, args, device))
     pred = logits[:, P.shape[1] - 1: -1]
     return F.cross_entropy(pred.reshape(-1, pred.size(-1)), T.reshape(-1))
 
@@ -131,12 +160,13 @@ def sample_diffusion(model, P, pm, PP, TP, PS, TS, tok, args, device):
     pmask = pad_mask_of(pm, canvas, device)
     pos = pos_for(PP, TP, args, device)
     seg = seg_for(PS, TS, args, device)
+    aba = abacus_for(PP, TP, args, device)
     pred = None
     for s in range(args.T, 0, -1):
         masked = x == tok.mask
         if not masked.any():
             break
-        logits = model(torch.cat([P, x], 1), pmask, pos, seg)[:, P.shape[1]:]
+        logits = model(torch.cat([P, x], 1), pmask, pos, seg, aba)[:, P.shape[1]:]
         conf, pred = logits.softmax(-1).max(-1)
         conf = conf.masked_fill(~masked, -1.0)
         remaining = int(canvas * (s - 1) / args.T)
@@ -152,15 +182,28 @@ def sample_diffusion(model, P, pm, PP, TP, PS, TS, tok, args, device):
 
 @torch.no_grad()
 def sample_ar(model, P, pm, PP, TP, PS, TS, tok, args, device):
+    """Greedy left-to-right decoding.
+
+    The auxiliary signals are built ONCE for the full sequence and then sliced,
+    which matters for two reasons: randomized positions must stay fixed across
+    decode steps (re-drawing them each step showed the model a different
+    position assignment every token), and the position rule must match whatever
+    training used (pos_for returns None under --abacus, so generation must too).
+    """
     B = P.shape[0]
     out = torch.full((B, CANVAS), tok.pad, device=device, dtype=torch.long)
-    cur, curpos = P, PP.to(device)
+    full_pos = pos_for(PP, TP, args, device)      # None, or (B, MAX_PROMPT+CANVAS)
+    full_seg = seg_for(PS, TS, args, device)
+    full_aba = abacus_for(PP, TP, args, device)
+    cur = P
     curmask = pm.to(device)
     for j in range(CANVAS):
+        L = P.shape[1] + j
         pmk = torch.cat([curmask, torch.ones(B, j, dtype=torch.bool, device=device)], 1) if j else curmask
-        pos = torch.cat([curpos, TP[:, :j].to(device)], 1) if args.coupled else None
-        seg = torch.cat([PS.to(device), TS[:, :j].to(device)], 1) if args.coupled else None
-        logits = model(cur, pmk, pos, seg)
+        logits = model(cur, pmk,
+                       None if full_pos is None else full_pos[:, :L],
+                       None if full_seg is None else full_seg[:, :L],
+                       None if full_aba is None else full_aba[:, :L])
         nxt = logits[:, -1].argmax(-1)
         out[:, j] = nxt
         cur = torch.cat([cur, nxt[:, None]], 1)
@@ -263,8 +306,16 @@ def main():
             nfe[t_steps] = e
         args.T = keep
 
+    n_par = model.n_params()
+    n_emb = model.emb.weight.numel()
+    tokens = args.steps * args.bs * args.accum * (MAX_PROMPT + CANVAS)
+    compute = {"params": n_par, "non_embedding_params": n_par - n_emb,
+               "train_tokens": tokens,
+               "train_flops_approx": 6 * (n_par - n_emb) * tokens,
+               "inference_passes_per_example": (args.T if args.mode == "diff" else CANVAS),
+               "minutes": (time.time() - t0) / 60}
     json.dump({"args": vars(args), "final": final, "digit_acc": dfinal,
-               "nfe": nfe, "minutes": (time.time() - t0) / 60},
+               "nfe": nfe, "compute": compute, "minutes": (time.time() - t0) / 60},
               open(os.path.join(args.out, "result.json"), "w"), indent=2)
     torch.save(model.state_dict(), os.path.join(args.out, "model.pt"))
     print("FINAL", json.dumps(final), flush=True)

@@ -281,3 +281,61 @@ def build_add_dataset(n, digits, max_prompt, canvas, seed=0, exact=False, revers
 
 def target_lens(deg, path_len):
     return 2 * (path_len + 1)  # nodes + separators + EOS
+
+
+def build_seq_dataset(n, length, max_prompt, canvas, seed=0, exact=False,
+                      max_offset=8, task="parity"):
+    """Non-arithmetic length-generalization probes.
+
+    These separate "does the method need a CHAIN dependency" from "does it need
+    place value" - the question multiplication raised but could not answer:
+
+      parity  : output[j] = XOR of input[0..j].  Sequential chain, exactly like
+                a carry, but no arithmetic and no place value.
+      reverse : output[j] = input[n-1-j].        Positional alignment, NO chain.
+
+    Aligned ids point each output slot at the input slot it depends on, which is
+    the direct analogue of place-value alignment for addition.
+    """
+    tok = Tokenizer(10)
+    rng = np.random.default_rng(seed)
+    P = np.full((n, max_prompt), tok.pad, dtype=np.int64)
+    T = np.full((n, canvas), tok.pad, dtype=np.int64)
+    PP = np.zeros((n, max_prompt), dtype=np.int64)
+    TP = np.zeros((n, canvas), dtype=np.int64)
+    PS = np.zeros((n, max_prompt), dtype=np.int64)
+    TS = np.zeros((n, canvas), dtype=np.int64)
+    pmask = np.zeros((n, max_prompt), dtype=bool)
+
+    for i in range(n):
+        L = length if exact else int(rng.integers(1, length + 1))
+        off = int(rng.integers(0, max_offset + 1))
+        hi = 2 if task == "parity" else 10
+        xs = [int(v) for v in rng.integers(0, hi, size=L)]
+
+        if task == "parity":
+            run, ys = 0, []
+            for v in xs:
+                run ^= v
+                ys.append(run)
+        else:
+            ys = list(reversed(xs))
+
+        prompt = [str(v) for v in xs] + ["="]
+        ppos = [off + j + 1 for j in range(L)] + [0]
+        pseg = [1] * L + [0]
+
+        target = [str(v) for v in ys] + ["[EOS]"]
+        # each output slot carries the id of the input slot it depends on
+        # reverse counts down, so slots past the sequence end would go negative
+        tpos = [(off + j + 1) if task == "parity" else max(0, off + L - j)
+                for j in range(canvas)]
+        tseg = [3] * canvas
+
+        pe, te = tok.encode(prompt), tok.encode(target)
+        if len(pe) > max_prompt or len(te) > canvas:
+            raise ValueError(f"too long: {len(pe)}>{max_prompt} or {len(te)}>{canvas}")
+        P[i, : len(pe)] = pe;  PP[i, : len(pe)] = ppos;  PS[i, : len(pe)] = pseg
+        T[i, : len(te)] = te;  TP[i, :] = tpos;          TS[i, :] = tseg
+        pmask[i, : len(pe)] = True
+    return P, T, pmask, PP, TP, PS, TS, tok

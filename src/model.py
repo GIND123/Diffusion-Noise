@@ -103,6 +103,11 @@ class Transformer(nn.Module):
         # bidirectional model needs this to tell those tokens apart; a causal
         # model gets the same information free from the attention mask.
         self.seg = nn.Embedding(8, d)
+        # Abacus-style significance embedding (McLeish et al. 2024): the digit's
+        # place value enters as a learned vector added to the token embedding,
+        # rather than as a positional index. Kept separate so the two published
+        # framings can be compared head-to-head in the same harness.
+        self.abacus = nn.Embedding(256, d)
         if pe == "ape":
             self.pos = nn.Embedding(max_len, d)
         elif pe == "sin":
@@ -119,11 +124,13 @@ class Transformer(nn.Module):
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def forward(self, idx, pad_mask=None, pos_ids=None, seg_ids=None):
+    def forward(self, idx, pad_mask=None, pos_ids=None, seg_ids=None, abacus_ids=None):
         B, L = idx.shape
         x = self.emb(idx)
         if seg_ids is not None:
             x = x + self.seg(seg_ids)
+        if abacus_ids is not None:
+            x = x + self.abacus(abacus_ids.clamp(0, 255))
         if self.pe_kind == "ape":
             p = torch.arange(L, device=idx.device)[None] if pos_ids is None else pos_ids
             x = x + self.pos(p)

@@ -55,6 +55,17 @@ def envelope(rs, thr):
     return max(ok) if ok else 0
 
 
+def boot_ci(vals, n=2000, seed=0):
+    """Bootstrap 95% CI over seeds. With 3-5 seeds the normal approximation is
+    not trustworthy, and we measured one configuration spanning 3%-68%."""
+    if len(vals) < 2:
+        return (float(np.mean(vals)) * 100, float(np.mean(vals)) * 100)
+    rng = np.random.default_rng(seed)
+    a = np.array(vals)
+    means = [rng.choice(a, len(a), replace=True).mean() for _ in range(n)]
+    return (float(np.percentile(means, 2.5)) * 100, float(np.percentile(means, 97.5)) * 100)
+
+
 md = ["# Results\n"]
 
 # ---------- Figure 1 + Table 1: the method vs the baseline -------------------
@@ -188,6 +199,80 @@ if dg:
             tag = "**ours**" if coup else "baseline"
             md.append(f"| {ARCH[mode]} / {tag} | " + " | ".join(cells) + " |")
     md.append("")
+
+# ---------- Table 6: published-baseline comparison -------------------------
+md.append("## Table 6 — Against published methods (addition, 8 digits)\n")
+md.append("| method | architecture | 6d | 7d | 8d | 95% CI at 8d |")
+md.append("|---|---|---|---|---|---|")
+SPEC = [("sequential ids (baseline)", dict(prefix="E-", randpos=0)),
+        ("randomized PE (Ruoss 2023)", dict(prefix="E-", randpos=1)),
+        ("Abacus embeddings (McLeish 2024)", dict(prefix="I-", abacus=1)),
+        ("place-value ids (ours)", dict(prefix="I-", abacus=0))]
+for label, kw in SPEC:
+    for mode in ("ar", "diff"):
+        rs = sel(mode=mode, **kw)
+        g = stat(rs)
+        if not g:
+            continue
+        _, st = g
+        cells = [f"{st[d][0]:.1f}" if d in st else "–" for d in (6, 7, 8)]
+        lo, hi = boot_ci([r["final"].get("d8", 0) for r in rs])
+        md.append(f"| {label} | {ARCH[mode]} | " + " | ".join(cells) + f" | [{lo:.1f}, {hi:.1f}] |")
+md.append("")
+
+# ---------- Table 7: non-arithmetic probes ---------------------------------
+md.append("## Table 7 — Does the method need place value, or just alignment?\n")
+md.append("Parity has a sequential chain but no place value; reverse has positional "
+          "alignment but no chain. Together with multiplication (no place-local "
+          "structure at all) these bound where the method applies.\n")
+md.append("| task | architecture | ids | in-dist | 2x length | H*(50%) |")
+md.append("|---|---|---|---|---|---|")
+for task, pref in (("parity", "J-parity"), ("reverse", "K-reverse")):
+    for mode in ("ar", "diff"):
+        for coup in (0, 1):
+            rs = sel(prefix=pref, mode=mode, coupled=coup, segments=1)
+            g = stat(rs)
+            if not g:
+                continue
+            ds, st = g
+            base, far = ds[0], ds[-2] if len(ds) > 1 else ds[0]
+            tag = "aligned (ours)" if coup else "sequential"
+            md.append(f"| {task} | {ARCH[mode]} | {tag} | {st[base][0]:.1f} | "
+                      f"{st[far][0]:.1f} | {envelope(rs,.5)} |")
+md.append("")
+
+# ---------- Table 8: matched compute ---------------------------------------
+md.append("## Table 8 — Matched compute\n")
+md.append("| architecture | non-embedding params | train tokens | train FLOPs | inference passes/example |")
+md.append("|---|---|---|---|---|")
+for mode in ("ar", "diff"):
+    rs = [r for r in sel(prefix="A-main", mode=mode, coupled=1, pe="alibi") if r.get("compute")]
+    if not rs:
+        continue
+    c = rs[0]["compute"]
+    md.append(f"| {ARCH[mode]} | {c['non_embedding_params']/1e6:.2f}M | "
+              f"{c['train_tokens']/1e6:.0f}M | {c['train_flops_approx']:.2e} | "
+              f"{c['inference_passes_per_example']} |")
+md.append("\nBoth arms share one transformer, identical data, optimizer and step "
+          "count. Diffusion spends T refinement passes at inference where the "
+          "autoregressive model spends one per emitted token.\n")
+
+# ---------- Table 9: scaling ------------------------------------------------
+md.append("## Table 9 — Scaling\n")
+md.append("| size | architecture | ids | 6d | 8d | 10d |")
+md.append("|---|---|---|---|---|---|")
+for d_model in (384, 512, 768):
+    for mode in ("ar", "diff"):
+        for coup in (0, 1):
+            rs = sel(prefix=f"F-size{d_model}", mode=mode, coupled=coup)
+            g = stat(rs)
+            if not g:
+                continue
+            _, st = g
+            cells = [f"{st[x][0]:.1f}" if x in st else "–" for x in (6, 8, 10)]
+            tag = "**ours**" if coup else "baseline"
+            md.append(f"| d={d_model} | {ARCH[mode]} | {tag} | " + " | ".join(cells) + " |")
+md.append("")
 
 open(f"{OUT}/summary.md", "w").write("\n".join(md) + "\n")
 print("\n".join(md[:40]))

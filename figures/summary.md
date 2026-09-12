@@ -4,10 +4,10 @@
 
 | configuration | 5d | 6d | 7d | 8d | 10d | 12d | 15d | 20d | H*(50%) |
 |---|---|---|---|---|---|---|---|---|---|
-| Autoregressive / baseline | 100.0±0 | 35.2±28 | 1.5±1 | 0.2±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 5 |
-| Autoregressive / **ours** | 100.0±0 | 99.5±0 | 89.5±9 | 52.3±32 | 5.7±4 | 0.3±0 | 0.0±0 | 0.0±0 | 8 |
-| Masked diffusion / baseline | 100.0±0 | 55.0±24 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 6 |
-| Masked diffusion / **ours** | 100.0±0 | 100.0±0 | 97.5±0 | 84.8±5 | 32.0±9 | 7.5±2 | 0.5±0 | 0.0±0 | 8 |
+| Autoregressive / baseline | 100.0±0 | 21.5±24 | 1.1±1 | 0.1±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 5 |
+| Autoregressive / **ours** | 100.0±0 | 99.4±0 | 80.9±13 | 34.2±30 | 3.0±4 | 0.2±0 | 0.0±0 | 0.0±0 | 7 |
+| Masked diffusion / baseline | 100.0±0 | 57.4±32 | 0.2±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 6 |
+| Masked diffusion / **ours** | 100.0±0 | 100.0±0 | 97.6±1 | 81.3±5 | 33.1±7 | 7.6±1 | 0.8±0 | 0.0±0 | 8 |
 
 ## Table 2 — Positional encoding sweep (place-value ids)
 
@@ -45,8 +45,62 @@
 
 | configuration | 6d | 8d | 12d | 20d |
 |---|---|---|---|---|
-| Autoregressive / baseline | 84.8 | 47.4 | 6.9 | 3.6 |
-| Autoregressive / **ours** | 99.9 | 87.7 | 45.8 | 21.4 |
-| Masked diffusion / baseline | 90.0 | 34.4 | 9.1 | 0.4 |
-| Masked diffusion / **ours** | 100.0 | 98.0 | 84.1 | 65.2 |
+| Autoregressive / baseline | 80.3 | 48.3 | 4.1 | 3.4 |
+| Autoregressive / **ours** | 99.9 | 81.7 | 38.1 | 19.1 |
+| Masked diffusion / baseline | 88.9 | 32.0 | 9.9 | 3.4 |
+| Masked diffusion / **ours** | 100.0 | 97.6 | 83.9 | 64.6 |
+
+## Table 6 — Against published methods (addition, 8 digits)
+
+| method | architecture | 6d | 7d | 8d | 95% CI at 8d |
+|---|---|---|---|---|---|
+| sequential ids (baseline) | Autoregressive | 7.7 | 0.0 | 0.0 | [0.0, 0.0] |
+| sequential ids (baseline) | Masked diffusion | 28.3 | 0.3 | 0.0 | [0.0, 0.0] |
+| randomized PE (Ruoss 2023) | Autoregressive | 10.0 | 0.0 | 0.0 | [0.0, 0.0] |
+| randomized PE (Ruoss 2023) | Masked diffusion | 97.2 | 61.8 | 7.7 | [4.0, 12.0] |
+| Abacus embeddings (McLeish 2024) | Autoregressive | 59.2 | 12.0 | 0.8 | [0.0, 1.5] |
+| Abacus embeddings (McLeish 2024) | Masked diffusion | 94.5 | 82.3 | 63.8 | [59.5, 68.5] |
+| place-value ids (ours) | Autoregressive | 97.3 | 52.0 | 10.5 | [1.5, 26.5] |
+| place-value ids (ours) | Masked diffusion | 99.8 | 96.0 | 75.3 | [71.5, 82.0] |
+
+## Table 7 — Does the method need place value, or just alignment?
+
+Parity has a sequential chain but no place value; reverse has positional alignment but no chain. Together with multiplication (no place-local structure at all) these bound where the method applies.
+
+| task | architecture | ids | in-dist | 2x length | H*(50%) |
+|---|---|---|---|---|---|
+| parity | Autoregressive | sequential | 100.0 | 0.0 | 12 |
+| parity | Autoregressive | aligned (ours) | 100.0 | 0.3 | 15 |
+| parity | Masked diffusion | sequential | 100.0 | 0.0 | 12 |
+| parity | Masked diffusion | aligned (ours) | 100.0 | 0.2 | 15 |
+| reverse | Autoregressive | sequential | 100.0 | 0.0 | 15 |
+| reverse | Autoregressive | aligned (ours) | 100.0 | 30.7 | 20 |
+| reverse | Masked diffusion | sequential | 100.0 | 0.0 | 12 |
+| reverse | Masked diffusion | aligned (ours) | 100.0 | 100.0 | 40 |
+
+## Table 8 — Matched compute
+
+| architecture | non-embedding params | train tokens | train FLOPs | inference passes/example |
+|---|---|---|---|---|
+| Autoregressive | 10.75M | 250M | 1.61e+16 | 23 |
+| Masked diffusion | 10.75M | 250M | 1.61e+16 | 16 |
+
+Both arms share one transformer, identical data, optimizer and step count. Diffusion spends T refinement passes at inference where the autoregressive model spends one per emitted token.
+
+## Table 9 — Scaling
+
+| size | architecture | ids | 6d | 8d | 10d |
+|---|---|---|---|---|---|
+| d=384 | Autoregressive | baseline | 35.2 | 0.2 | 0.0 |
+| d=384 | Autoregressive | **ours** | 99.5 | 52.3 | 5.7 |
+| d=384 | Masked diffusion | baseline | 55.0 | 0.0 | 0.0 |
+| d=384 | Masked diffusion | **ours** | 100.0 | 84.8 | 32.0 |
+| d=512 | Autoregressive | baseline | 28.2 | 0.2 | 0.0 |
+| d=512 | Autoregressive | **ours** | 99.8 | 71.0 | 4.7 |
+| d=512 | Masked diffusion | baseline | 36.0 | 0.0 | 0.0 |
+| d=512 | Masked diffusion | **ours** | 100.0 | 72.3 | 21.3 |
+| d=768 | Autoregressive | baseline | 34.7 | 0.0 | 0.0 |
+| d=768 | Autoregressive | **ours** | 100.0 | 48.5 | 0.3 |
+| d=768 | Masked diffusion | baseline | 9.5 | 0.0 | 0.0 |
+| d=768 | Masked diffusion | **ours** | 99.7 | 73.8 | 21.8 |
 
