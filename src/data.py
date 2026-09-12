@@ -136,17 +136,25 @@ def build_op_dataset(n, digits, max_prompt, canvas, seed=0, exact=False,
         # Build operands digit-by-digit: 10**20 overflows int64, but Python ints
         # are arbitrary precision, so the arithmetic itself is exact at any size.
         def draw(nd):
-            ds = rng.integers(0, 10, size=nd)
+            ds = rng.integers(0, base, size=nd)
             if nd > 1 and ds[0] == 0:
-                ds[0] = rng.integers(1, 10)
-            return "".join(str(int(x)) for x in ds)
+                ds[0] = rng.integers(1, base)
+            return "".join(DIGITS[int(x)] for x in ds)
+
+        def to_base(v):
+            if v == 0:
+                return DIGITS[0]
+            out = ""
+            while v:
+                out = DIGITS[v % base] + out
+                v //= base
+            return out
+
         pa, pb = draw(d), draw(d)
-        a, b = int(pa), int(pb)
-        if op == "sub":
-            if int(pa) < int(pb):          # keep results non-negative
-                pa, pb = pb, pa
-            a, b = int(pa), int(pb)
-        ps = str({"add": a + b, "mul": a * b, "sub": a - b}[op])
+        if op == "sub" and int(pa, base) < int(pb, base):
+            pa, pb = pb, pa            # keep results non-negative
+        a, b = int(pa, base), int(pb, base)
+        ps = to_base({"add": a + b, "mul": a * b, "sub": a - b}[op])
         off = int(rng.integers(0, max_offset + 1))
 
         prompt, ppos, pseg = [], [], []

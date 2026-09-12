@@ -1,18 +1,20 @@
 #!/bin/bash
-# Runs automatically after the training array finishes (SLURM dependency), so it
-# survives the laptop being closed, the network dropping, or the session dying.
+# Runs on the cluster after a grid finishes (SLURM dependency), so results are
+# collected, backed up and published even if the laptop is closed, the network
+# drops, or the session that launched the work is long gone.
 #
-#   1. regenerate figures + summary from every run
-#   2. back up results to HOME (the only nightly-backed-up tier)
+#   1. regenerate figures + tables from every run
+#   2. back up to HOME (the only nightly-backed-up tier)
 #   3. back up weights to SHELL (1 TB, no 90-day purge unlike scratch)
-#   4. push everything to the Hugging Face Hub
+#   4. push to the Hugging Face Hub, with retries
 #
 #SBATCH -J finalize
-#SBATCH -t 02:00:00
+#SBATCH -t 03:00:00
 #SBATCH -c 4
 #SBATCH --mem=16g
 #SBATCH -p standard
 #SBATCH -o logs/finalize-%j.out
+#SBATCH --open-mode=append
 
 source /etc/profile
 module load pytorch/2.0.1
@@ -30,16 +32,16 @@ echo "=== 1. collect + plot ==="
 cd $STAR/src
 RUNS=$STAR/runs OUT=$STAR/figures python collect.py || echo "collect failed (continuing)"
 
-echo "=== 2. back up results + figures + code to HOME (backed up nightly) ==="
-mkdir -p $HOME_BK/{results,figures,src}
+echo "=== 2. back up to HOME (backed up nightly) ==="
+mkdir -p $HOME_BK/{results,figures,src,slurm}
 cp -f $STAR/figures/* $HOME_BK/figures/ 2>/dev/null
 cp -f $STAR/src/*.py $HOME_BK/src/ 2>/dev/null
+cp -f $STAR/*.sh $HOME_BK/slurm/ 2>/dev/null
 for d in $STAR/runs/*/; do
   n=$(basename $d)
   [ -f "$d/result.json" ] && cp -f "$d/result.json" "$HOME_BK/results/$n.json"
 done
 echo "  results backed up: $(ls $HOME_BK/results | wc -l)"
-du -sh $HOME_BK 2>/dev/null
 
 echo "=== 3. back up weights to SHELL (not purged) ==="
 if mkdir -p $SHELL_BK 2>/dev/null; then
@@ -52,9 +54,12 @@ else
   echo "  SHELL not writable from this node - weights remain on scratch"
 fi
 
-echo "=== 4. push to Hugging Face ==="
-python - <<'PY'
-import os, json, glob, pathlib
+echo "=== 4. push to Hugging Face (with retries) ==="
+# A transient network failure must not mean the results never reach the Hub, so
+# retry with backoff rather than giving up on the first error.
+for attempt in 1 2 3 4 5; do
+  python - <<'PY' && break
+import os, pathlib, sys
 from huggingface_hub import HfApi
 
 tok = pathlib.Path(os.path.expanduser("~/.hf_token")).read_text().strip()
@@ -73,55 +78,26 @@ tags: [masked-diffusion, discrete-diffusion, length-generalization, positional-e
 # Length Generalization in Masked Diffusion Language Models
 
 From-scratch masked diffusion language models (MDLM-style absorbing state) and
-matched autoregressive baselines, trained on multi-digit addition and evaluated
-on operand lengths never seen during training.
+matched autoregressive baselines, trained on arithmetic and algorithmic tasks and
+evaluated far beyond the lengths seen in training.
 
-**No pretrained weights or tokenizers are used anywhere** - every model starts
-from random initialization with a symbol-level vocabulary built from the data.
+**No pretrained weights or tokenizers are used anywhere.**
 
-## Method: significance-aligned position ids
-
-Tokens are numbered by place value rather than sequence index, so digits that
-must be combined share an id:
-
-```
- 4   7   +   8   5   =   1   3   2
- 2   1   0   2   1   0   3   2   1
-```
-
-"Combine equal ids, carry into id+1" does not depend on operand length, which is
-what permits extrapolation. A random per-example offset makes the model key on
-relative place value and exposes it to large ids during training.
-
-## Findings
-
-1. **Positional encodings do not transfer between architectures.** No positional
-   information at all, and sinusoidal encoding, each give 100% in-distribution
-   accuracy for autoregressive models and **0% for masked diffusion** - the
-   diffusion model cannot learn the task at all (3 seeds each). Bidirectional
-   attention has no implicit ordering to fall back on.
-2. **Length-generalization accuracy has very high seed variance** (one
-   configuration spanned 3%-68% across seeds), so single-seed comparisons in
-   this setting are not trustworthy.
+Code: https://github.com/GIND123/MSML612
 
 ## Results
 
 {table}
-
-## Setup
-
-6 layers, 384 hidden dimension, 6 heads, ~10.7M parameters. AdamW, learning rate
-1e-4, cosine schedule, bfloat16, effective batch 256. Trained on 1-5 digit
-operands; evaluated at 5, 6, 7, 8, 10, 12 digits. Exact-match accuracy.
-
-Code: https://github.com/GIND123/MSML612
 """)
 
 api = HfApi(token=tok)
 api.create_repo(repo, repo_type="model", private=True, exist_ok=True)
 api.upload_folder(folder_path=str(stage), repo_id=repo, repo_type="model",
-                  commit_message="Automated push: results, figures, code")
+                  commit_message="Automated push from Zaratan")
 print("pushed:", f"https://huggingface.co/{repo}")
 PY
+  echo "  push attempt $attempt failed; sleeping $((attempt * 60))s"
+  sleep $((attempt * 60))
+done
 
 echo "=== finalize complete ==="
