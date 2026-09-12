@@ -40,6 +40,8 @@ def get_args():
     p.add_argument("--warmup", type=int, default=300)
     p.add_argument("--T", type=int, default=16)
     p.add_argument("--eval_every", type=int, default=5000)
+    p.add_argument("--nfe_sweep", type=int, default=0,
+                   help="accuracy-vs-denoising-passes sweep; 7x the eval cost, so off by default")
     p.add_argument("--out", default="runs/dev")
     return p.parse_args()
 
@@ -241,7 +243,7 @@ def main():
 
     # accuracy vs number of denoising passes (no autoregressive analogue)
     nfe = {}
-    if args.mode == "diff":
+    if args.mode == "diff" and args.nfe_sweep:
         keep = args.T
         for t_steps in (1, 2, 4, 8, 16, 32):
             args.T = t_steps

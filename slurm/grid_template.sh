@@ -1,26 +1,18 @@
 #!/bin/bash
-# Full experiment grid: 90 runs across four studies.
-#   A  0-23   main result   : method vs baseline, both architectures, add
-#   B 24-53   encoding sweep: 5 positional encodings x 2 architectures, add
-#   C 54-77   ablation      : segments on/off x random offset on/off, add
-#   D 78-89   transfer      : multiplication, where place value != the algorithm
 #SBATCH -J grid
-#SBATCH -t 06:00:00
-#SBATCH -c 64
-#SBATCH --mem=48g
-#SBATCH -p standard
+__HW__
 #SBATCH -o logs/grid-%A_%a.out
-#SBATCH --array=0-89%45
+#SBATCH --array=0-89%__CONC__
 
 source /etc/profile
-module load pytorch/2.0.1
-export OMP_NUM_THREADS=64 MKL_NUM_THREADS=64
-SCR=/scratch/zt1/project/msml612/user/$USER
+SCR=/scratch/zt1/project/msml612/user/$USER   # must precede PYSETUP, which uses it
+__PYSETUP__
+__THREADS__
 cd $SCR/star/src
 
 I=$SLURM_ARRAY_TASK_ID
 SEEDS=(0 1 2)
-COMMON="--steps 6000 --n_train 200000 --n_eval 200 --lr 1e-4 --d 384 --layers 6 --heads 6 --bs 256 --accum 1 --eval_every 6000 --T 16"
+COMMON="--steps 6000 --n_train 200000 --n_eval 200 --lr 1e-4 --d 384 --layers 6 --heads 6 __BATCH__ --eval_every 6000 --T 16"
 
 if [ $I -lt 24 ]; then                       # ---- A: main result
   J=$I; COUP=$((J / 12)); MODE=$(( (J % 12) / 6 )); PEI=$(( (J % 6) / 3 )); S=${SEEDS[$((J % 3))]}
@@ -51,4 +43,4 @@ else                                          # ---- D: multiplication
 fi
 
 echo "=== $NAME ==="
-python train_add.py $ARGS $COMMON --out $SCR/star/runs/$NAME
+$PY train_add.py $ARGS $COMMON --out $SCR/star/runs/$NAME

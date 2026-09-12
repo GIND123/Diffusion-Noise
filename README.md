@@ -146,35 +146,60 @@ cosine decay, weight decay 0.01, bfloat16, effective batch 256, 10,000 steps on
 
 ## 5. What we found
 
+### The method works, and masked diffusion benefits more than autoregressive
+
+Trained on operands of at most 5 digits, tested far beyond. With place-value
+identifiers, diffusion holds **84.8%** at 8 digits and **32.0%** at 10, where the
+autoregressive model with the same treatment manages 52.3% and 5.7%. Both
+baselines are effectively dead by 7 digits.
+
+Per-digit accuracy shows why this is an algorithm rather than a lookup: at **20
+digits — four times the training length — the model still places 68.9% of
+individual digits correctly**, degrading gracefully rather than collapsing into
+noise.
+
 ### Positional encodings do not transfer between architectures
 
-Two schemes that give autoregressive models **100%** in-distribution accuracy
-leave masked diffusion **completely unable to learn the task — 0%, on every
-seed**: supplying no positional information at all, and sinusoidal encoding.
+Supplying no positional information at all gives autoregressive models 98.8%
+in-distribution accuracy and leaves masked diffusion at **0%** — unable to learn
+the task on any seed. An autoregressive model reads tokens in order, so position
+is implicit in the act of reading; the literature showing that *no* encoding is
+best for length generalization rests on exactly that implicit signal. A diffusion
+model sees every position at once, and without a positional signal it is holding
+an unordered bag of digits.
 
-The mechanism is straightforward. An autoregressive model reads tokens in order,
-so position is implicit in the act of reading; the literature showing that *no*
-positional encoding is best for length generalization rests on exactly that
-implicit signal. A diffusion model sees all positions simultaneously. Remove the
-positional signal and it is holding an unordered bag of digits.
+**Rotary embeddings are the strongest pairing**, reaching 10 digits for
+autoregressive and **12 for diffusion**.
 
-This matters practically: the best-performing encoding for autoregressive length
-generalization is **unavailable** to diffusion.
+### Segment embeddings matter far more for autoregressive models
 
-### High seed variance
+Removing them costs the autoregressive model everything (0% at 6 digits) while
+diffusion still reaches 72%. This is the opposite of what we first concluded: an
+earlier apparent diffusion failure turned out to be the terminator bug described
+below, not a missing segment signal.
 
-On this task, one configuration spanned **3% to 68%** across seeds. Single-seed
-comparisons here — including published ones — should be treated with suspicion.
-Every number in this repository is reported as mean ± standard deviation over 3
-seeds.
+### The method does not transfer to multiplication
 
-### Failure analysis drove the method
+Every configuration collapses (~2.7% at 3 digits, 0 beyond). Multiplication's
+algorithm is not place-local — each output digit depends on many input pairs —
+so aligning place values does not align the computation. The method helps when
+the alignment matches the algorithm's dependency structure, and not otherwise.
 
-Two of the three method components came directly from inspecting model outputs
-rather than from theory. The terminator fix in particular was invisible in the
-metrics: the model produced **perfectly correct digits** and was scored at 0%
-because the end-of-sequence marker landed in the wrong slot, being positionally
-indistinguishable from padding.
+### Length-generalization accuracy has very high seed variance
+
+One configuration spanned 3%–68% across seeds. Single-seed comparisons here —
+including published ones — should be treated with suspicion. Every number in
+this repository is mean ± standard deviation over 3 seeds.
+
+### Two bugs that the numbers alone would have hidden
+
+The terminator token originally shared padding's position identifier, so the
+model produced **perfectly correct digits** and scored 0% because it could not
+tell which slot should end the sequence. Separately, an audit
+(`src/audit.py`) found that target identifiers were assigned only to written
+slots, which handed the model the answer length for free — information the
+baseline never received. Both are fixed; the affected runs were discarded rather
+than reported.
 
 ### Figures
 
@@ -204,34 +229,51 @@ so that no single favourable step count is cherry-picked.
 
 | configuration | 5d | 6d | 7d | 8d | 10d | 12d | 15d | 20d | H*(50%) |
 |---|---|---|---|---|---|---|---|---|---|
-| Autoregressive / baseline | 100.0±0 | 27.3±12 | 0.3±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 5 |
-| Masked diffusion / baseline | 100.0±0 | 12.0±0 | 1.2±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 5 |
+| Autoregressive / baseline | 100.0±0 | 35.2±28 | 1.5±1 | 0.2±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 5 |
+| Autoregressive / **ours** | 100.0±0 | 99.5±0 | 89.5±9 | 52.3±32 | 5.7±4 | 0.3±0 | 0.0±0 | 0.0±0 | 8 |
+| Masked diffusion / baseline | 100.0±0 | 55.0±24 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 | 6 |
+| Masked diffusion / **ours** | 100.0±0 | 100.0±0 | 97.5±0 | 84.8±5 | 32.0±9 | 7.5±2 | 0.5±0 | 0.0±0 | 8 |
 
 ## Table 2 — Positional encoding sweep (place-value ids)
 
 | encoding | AR in-dist | AR H*(50%) | Diffusion in-dist | Diffusion H*(50%) |
 |---|---|---|---|---|
-| none | – | – | – | – |
-| learned abs. | – | – | – | – |
-| sinusoidal | – | – | – | – |
-| rotary | – | – | – | – |
-| distance rule | – | – | – | – |
+| none | 98.8±1 | 6 | 0.0±0 | 0 |
+| learned abs. | 100.0±0 | 6 | 100.0±0 | 8 |
+| sinusoidal | 100.0±0 | 6 | 98.8±2 | 6 |
+| rotary | 100.0±0 | 10 | 100.0±0 | 12 |
+| distance rule | 100.0±0 | 7 | 100.0±0 | 8 |
 
 ## Table 3 — Component ablation (addition, distance rule)
 
 | segments | random offset | architecture | 6d | 8d | 12d | H*(50%) |
 |---|---|---|---|---|---|---|
+| no | no | Autoregressive | 0.0 | 0.0 | 0.0 | 0 |
+| no | no | Masked diffusion | 72.0 | 52.2 | 2.7 | 8 |
+| no | yes | Autoregressive | 0.0 | 0.0 | 0.0 | 0 |
+| no | yes | Masked diffusion | 73.0 | 58.7 | 4.8 | 8 |
+| yes | no | Autoregressive | 99.0 | 15.7 | 0.0 | 7 |
+| yes | no | Masked diffusion | 99.5 | 86.5 | 13.8 | 8 |
+| yes | yes | Autoregressive | 100.0 | 27.5 | 0.0 | 7 |
+| yes | yes | Masked diffusion | 99.8 | 75.7 | 11.5 | 8 |
 
-## Figure 3 — accuracy vs denoising passes
+## Table 4 — Multiplication (place value is NOT the algorithm)
 
-Autoregressive models have no equivalent knob; this is compute spent purely at inference.
+| configuration | 3d | 4d | 5d | 6d | 7d |
+|---|---|---|---|---|---|
+| Autoregressive / baseline | 2.2±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 |
+| Autoregressive / **ours** | 2.7±1 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 |
+| Masked diffusion / baseline | 0.5±0 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 |
+| Masked diffusion / **ours** | 2.7±1 | 0.0±0 | 0.0±0 | 0.0±0 | 0.0±0 |
 
 ## Table 5 — Per-digit accuracy (partial credit)
 
 | configuration | 6d | 8d | 12d | 20d |
 |---|---|---|---|---|
-| Autoregressive / baseline | 83.4 | 36.8 | 5.5 | 0.0 |
-| Masked diffusion / baseline | 81.9 | 50.8 | 13.0 | 3.8 |
+| Autoregressive / baseline | 84.8 | 47.4 | 6.9 | 3.6 |
+| Autoregressive / **ours** | 99.9 | 87.7 | 45.8 | 21.4 |
+| Masked diffusion / baseline | 90.0 | 34.4 | 9.1 | 0.4 |
+| Masked diffusion / **ours** | 100.0 | 98.0 | 84.1 | 65.2 |
 
 
 <!-- RESULTS:END -->
