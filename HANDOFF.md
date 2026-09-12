@@ -28,7 +28,7 @@ Copy the whole `Documents/Zaratan/` folder across by hand (it holds `.env`,
 
 ```bash
 cd ~/Documents/Zaratan
-git clone https://github.com/GIND123/MSML612.git    # if not copied with the folder
+git clone https://github.com/GIND123/Diffusion-Noise.git    # if not copied with the folder
 chmod 600 .env && chmod +x zaratan-run.sh
 
 # SSH alias (or use the full host directly)
